@@ -1,23 +1,42 @@
-# GitOps Project
+# Secure GitHub Clone with Azure Integration
 
-## Project Overview
-This project is designed to streamline the deployment and management of applications using GitOps principles. It leverages Git repositories as the single source of truth and automates the deployment process through CI/CD pipelines and Kubernetes.
+A Python project that securely clones GitHub repositories with automatic Azure VM provisioning, cryptographic key management, and Network Security Group (NSG) configuration.
 
-### Key Features:
-- **Version Control**: All configurations are stored in Git.
-- **Automated Deployments**: Changes in the repository trigger automated deployment workflows.
-- **Security**: Built-in compliance and security checks to ensure deployments meet organizational policies.
+## Architecture Overview
 
-## Security Documentation
+### Phase 1: VM1 - Secure Project Compilation
+- Creates an Azure VM with integrated key management
+- Generates RSA key pair (public key in Azure Key Vault, private key stored in VM)
+- Implements transit encryption for secure cloning
+- Establishes NSG rules for network isolation
+- Single VM handles project compilation and implementation
 
-### Authentication & Authorization
-- Use strong authentication methods, such as multi-factor authentication (MFA).
-- Regularly review and manage access permissions for repository collaborators.
+### Phase 2: VM2 - Security Validation (Future)
+- Separate VM for file-by-file compilation
+- Validates compiled code for injection attacks
+- Ensures no security risks in codebase
 
-### Data Protection
-- Ensure that sensitive data, such as credentials and tokens, are stored securely using secret management tools.
-- Regularly audit your repository for any exposed sensitive information.
+## Prerequisites
 
-### Compliance
-- Adhere to organizational security policies and compliance requirements.
-- Document compliance procedures in accordance with industry standards and regulations.
+- Python 3.8+
+- Azure Account with active subscription
+- Azure CLI installed and configured
+- Git installed
+
+## Installation
+
+```bash
+# Clone the repository
+git clone https://github.com/yourusername/secure-github-clone.git
+cd secure-github-clone
+
+# Create virtual environment
+python -m venv venv
+source venv/bin/activate  # On Windows: venv\Scripts\activate
+
+# Install dependencies
+pip install -r requirements.txt
+
+# Setup environment variables
+cp .env.example .env
+# Edit .env with your Azure credentials

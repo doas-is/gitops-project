@@ -1,0 +1,1102 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Secure Analysis Platform — Architecture</title>
+<link href="https://fonts.googleapis.com/css2?family=Space+Mono:ital,wght@0,400;0,700;1,400&family=Syne:wght@400;600;700;800&display=swap" rel="stylesheet">
+<style>
+:root {
+  --ink: #0a0a0f;
+  --paper: #f5f2eb;
+  --paper2: #ede9df;
+  --accent: #e8412a;
+  --accent2: #2a6fe8;
+  --accent3: #22b55a;
+  --accent4: #d4890a;
+  --muted: #7a7570;
+  --border: #c8c3b8;
+  --border-dark: #3a3530;
+  --mono: 'Space Mono', monospace;
+  --sans: 'Syne', sans-serif;
+}
+
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+body {
+  background: var(--paper);
+  color: var(--ink);
+  font-family: var(--mono);
+  min-height: 100vh;
+  overflow-x: hidden;
+}
+
+/* Grain texture overlay */
+body::before {
+  content: '';
+  position: fixed;
+  inset: 0;
+  background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='noise'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23noise)' opacity='0.04'/%3E%3C/svg%3E");
+  pointer-events: none;
+  z-index: 1000;
+  opacity: 0.4;
+}
+
+header {
+  padding: 32px 48px 24px;
+  border-bottom: 2px solid var(--ink);
+  display: flex;
+  align-items: baseline;
+  gap: 24px;
+  background: var(--paper);
+  position: sticky;
+  top: 0;
+  z-index: 100;
+}
+
+header h1 {
+  font-family: var(--sans);
+  font-size: 22px;
+  font-weight: 800;
+  letter-spacing: -0.5px;
+}
+
+.tag {
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 1.5px;
+  text-transform: uppercase;
+  padding: 3px 8px;
+  border: 1.5px solid currentColor;
+}
+.tag-red { color: var(--accent); border-color: var(--accent); }
+.tag-blue { color: var(--accent2); border-color: var(--accent2); }
+.tag-green { color: var(--accent3); border-color: var(--accent3); }
+
+.subtitle {
+  margin-left: auto;
+  font-size: 11px;
+  color: var(--muted);
+  letter-spacing: 0.5px;
+}
+
+/* ── Main Layout ── */
+.page { padding: 40px 48px; }
+
+/* ── Section headers ── */
+.section-label {
+  font-family: var(--sans);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 3px;
+  text-transform: uppercase;
+  color: var(--muted);
+  margin-bottom: 20px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.section-label::after {
+  content: '';
+  flex: 1;
+  height: 1px;
+  background: var(--border);
+}
+
+/* ── Pipeline Flow ── */
+.pipeline {
+  display: flex;
+  align-items: stretch;
+  gap: 0;
+  margin-bottom: 48px;
+  overflow-x: auto;
+  padding-bottom: 4px;
+}
+
+.pipeline-stage {
+  flex: 1;
+  min-width: 160px;
+  border: 2px solid var(--ink);
+  background: var(--paper2);
+  position: relative;
+  cursor: pointer;
+  transition: transform 0.15s, box-shadow 0.15s;
+}
+
+.pipeline-stage:not(:last-child) {
+  border-right: none;
+}
+
+.pipeline-stage:hover {
+  transform: translateY(-3px);
+  box-shadow: 4px 6px 0 var(--ink);
+  z-index: 10;
+  border-right: 2px solid var(--ink) !important;
+}
+
+.pipeline-stage.active {
+  background: var(--ink);
+  color: var(--paper);
+}
+
+.stage-num {
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 1px;
+  padding: 8px 12px 6px;
+  border-bottom: 1.5px solid var(--border);
+  color: var(--muted);
+}
+.pipeline-stage.active .stage-num { color: var(--paper2); border-color: #444; }
+
+.stage-icon {
+  font-size: 28px;
+  padding: 16px 12px 8px;
+  display: block;
+}
+
+.stage-title {
+  font-family: var(--sans);
+  font-size: 13px;
+  font-weight: 700;
+  padding: 0 12px 6px;
+  line-height: 1.3;
+}
+
+.stage-role {
+  font-size: 9px;
+  letter-spacing: 1.5px;
+  text-transform: uppercase;
+  padding: 4px 12px 12px;
+  color: var(--muted);
+}
+.pipeline-stage.active .stage-role { color: #aaa; }
+
+.stage-arrow {
+  position: absolute;
+  right: -16px;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 30px;
+  height: 30px;
+  background: var(--paper);
+  border: 2px solid var(--ink);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 14px;
+  z-index: 20;
+  border-radius: 50%;
+}
+
+/* ── Two-column layout ── */
+.cols {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 32px;
+  margin-bottom: 40px;
+}
+
+/* ── Agent Detail Cards ── */
+.agent-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 20px;
+  margin-bottom: 48px;
+}
+
+.agent-card {
+  border: 2px solid var(--ink);
+  background: var(--paper);
+  overflow: hidden;
+  cursor: pointer;
+  transition: transform 0.15s, box-shadow 0.15s;
+}
+.agent-card:hover {
+  transform: translateY(-2px);
+  box-shadow: 3px 4px 0 var(--ink);
+}
+
+.agent-header {
+  padding: 14px 16px 10px;
+  border-bottom: 2px solid var(--ink);
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.agent-dot {
+  width: 10px; height: 10px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.agent-name {
+  font-family: var(--sans);
+  font-size: 13px;
+  font-weight: 700;
+  flex: 1;
+}
+
+.agent-vm {
+  font-size: 9px;
+  letter-spacing: 1px;
+  color: var(--muted);
+  text-transform: uppercase;
+  background: var(--paper2);
+  padding: 2px 6px;
+  border: 1px solid var(--border);
+}
+
+.agent-body { padding: 14px 16px; }
+
+.agent-file {
+  font-size: 10px;
+  color: var(--accent2);
+  margin-bottom: 10px;
+  font-style: italic;
+}
+
+.prop-row {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 6px;
+  font-size: 11px;
+  line-height: 1.5;
+}
+.prop-key {
+  color: var(--muted);
+  min-width: 60px;
+  flex-shrink: 0;
+}
+.prop-val { color: var(--ink); }
+
+.guarantee {
+  margin-top: 12px;
+  padding: 8px 10px;
+  background: #f0f8f2;
+  border-left: 3px solid var(--accent3);
+  font-size: 10px;
+  line-height: 1.6;
+  color: #1a4a28;
+}
+
+.danger {
+  margin-top: 8px;
+  padding: 8px 10px;
+  background: #fdf0ee;
+  border-left: 3px solid var(--accent);
+  font-size: 10px;
+  line-height: 1.6;
+  color: #5a1a10;
+}
+
+/* ── Data Flow diagram ── */
+.flow-diagram {
+  border: 2px solid var(--ink);
+  background: var(--ink);
+  color: var(--paper);
+  padding: 28px 32px;
+  font-size: 12px;
+  line-height: 2.2;
+  overflow-x: auto;
+  margin-bottom: 40px;
+}
+
+.flow-line {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  white-space: nowrap;
+}
+.flow-line + .flow-line { margin-top: 2px; }
+
+.fl-agent { color: #f5c842; font-weight: 700; min-width: 180px; }
+.fl-arrow { color: #888; }
+.fl-data { color: #7dd9a0; }
+.fl-note { color: #8ab4f8; font-style: italic; margin-left: 8px; }
+.fl-sec { color: var(--accent); }
+.fl-indent { padding-left: 48px; color: #aaa; font-size: 11px; }
+.fl-divider { border-top: 1px solid #333; margin: 6px 0; }
+
+/* ── Message Schema ── */
+.schema-block {
+  border: 2px solid var(--ink);
+  overflow: hidden;
+  margin-bottom: 20px;
+}
+.schema-header {
+  background: var(--ink);
+  color: var(--paper);
+  padding: 8px 16px;
+  font-family: var(--sans);
+  font-size: 12px;
+  font-weight: 700;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+.schema-body {
+  padding: 14px 16px;
+  font-size: 11px;
+  background: var(--paper2);
+}
+.schema-field {
+  display: flex;
+  gap: 12px;
+  padding: 3px 0;
+  border-bottom: 1px dotted var(--border);
+}
+.schema-field:last-child { border-bottom: none; }
+.sf-name { color: var(--accent2); min-width: 200px; font-weight: 700; }
+.sf-type { color: var(--muted); min-width: 100px; }
+.sf-note { color: var(--ink); }
+
+/* ── Security Matrix ── */
+.matrix {
+  border: 2px solid var(--ink);
+  overflow: hidden;
+  margin-bottom: 40px;
+}
+.matrix-row {
+  display: grid;
+  grid-template-columns: 220px repeat(5, 1fr);
+  border-bottom: 1px solid var(--border);
+}
+.matrix-row:last-child { border-bottom: none; }
+.matrix-row.header {
+  background: var(--ink);
+  color: var(--paper);
+  font-family: var(--sans);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.5px;
+}
+.matrix-cell {
+  padding: 10px 12px;
+  font-size: 11px;
+  border-right: 1px solid var(--border);
+  display: flex;
+  align-items: center;
+}
+.matrix-cell:last-child { border-right: none; }
+.matrix-row.header .matrix-cell { border-color: #444; justify-content: center; text-align: center; }
+.check-y { color: var(--accent3); font-size: 14px; }
+.check-n { color: var(--accent); font-size: 14px; }
+.check-p { color: var(--accent4); font-size: 12px; }
+.row-label { font-weight: 700; font-size: 11px; }
+.row-sub { font-size: 10px; color: var(--muted); }
+.matrix-row:nth-child(even) { background: var(--paper2); }
+
+/* ── File tree ── */
+.filetree {
+  font-size: 12px;
+  line-height: 1.9;
+  padding: 20px 24px;
+  border: 2px solid var(--ink);
+  background: var(--paper2);
+  white-space: pre;
+  overflow-x: auto;
+}
+.ft-dir { color: var(--accent2); font-weight: 700; }
+.ft-file { color: var(--ink); }
+.ft-note { color: var(--muted); font-style: italic; }
+.ft-hot { color: var(--accent); font-weight: 700; }
+
+/* ── VM Lifecycle ── */
+.lifecycle {
+  display: flex;
+  align-items: center;
+  gap: 0;
+  border: 2px solid var(--ink);
+  overflow: hidden;
+  margin-bottom: 40px;
+}
+.lc-step {
+  flex: 1;
+  padding: 16px 12px;
+  border-right: 2px solid var(--ink);
+  text-align: center;
+}
+.lc-step:last-child { border-right: none; }
+.lc-icon { font-size: 22px; display: block; margin-bottom: 6px; }
+.lc-title { font-family: var(--sans); font-size: 11px; font-weight: 700; margin-bottom: 3px; }
+.lc-note { font-size: 9px; color: var(--muted); letter-spacing: 0.3px; }
+.lc-step:nth-child(1) { background: #f0f8f2; }
+.lc-step:nth-child(2) { background: #eef4fc; }
+.lc-step:nth-child(3) { background: #fdf7ee; }
+.lc-step:nth-child(4) { background: #f8f0ee; }
+.lc-step:nth-child(5) { background: var(--paper2); }
+
+/* ── Threat model ── */
+.threat-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 16px;
+  margin-bottom: 40px;
+}
+.threat-card {
+  border: 2px solid var(--ink);
+  overflow: hidden;
+}
+.threat-head {
+  padding: 10px 14px;
+  background: var(--ink);
+  color: var(--paper);
+  font-size: 11px;
+  font-weight: 700;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.threat-body {
+  padding: 12px 14px;
+  font-size: 11px;
+  line-height: 1.7;
+  background: var(--paper2);
+}
+.threat-body b { color: var(--accent); }
+.threat-body strong { color: var(--accent3); }
+
+/* ── Tooltip ── */
+.tooltip-wrap { position: relative; display: inline-block; }
+.tooltip-wrap:hover .tooltip { opacity: 1; pointer-events: auto; }
+.tooltip {
+  position: absolute;
+  bottom: calc(100% + 6px);
+  left: 50%;
+  transform: translateX(-50%);
+  background: var(--ink);
+  color: var(--paper);
+  font-size: 10px;
+  padding: 6px 10px;
+  white-space: nowrap;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 0.15s;
+  border: 1px solid var(--border-dark);
+  z-index: 50;
+}
+
+/* ── Animations ── */
+@keyframes fadeUp {
+  from { opacity: 0; transform: translateY(16px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+.animate { animation: fadeUp 0.4s ease both; }
+.animate:nth-child(1) { animation-delay: 0.05s; }
+.animate:nth-child(2) { animation-delay: 0.1s; }
+.animate:nth-child(3) { animation-delay: 0.15s; }
+.animate:nth-child(4) { animation-delay: 0.2s; }
+.animate:nth-child(5) { animation-delay: 0.25s; }
+.animate:nth-child(6) { animation-delay: 0.3s; }
+
+/* ── Pulse dot ── */
+@keyframes pulse-dot {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.4; transform: scale(0.8); }
+}
+.pulse { animation: pulse-dot 2s ease-in-out infinite; }
+
+/* scroll indicator */
+.scroll-hint {
+  font-size: 10px; color: var(--muted); margin-left: auto;
+  letter-spacing: 0.5px;
+}
+</style>
+</head>
+<body>
+
+<header>
+  <svg width="22" height="22" viewBox="0 0 22 22" fill="none">
+    <path d="M11 1L2 5.5V11c0 4.84 3.74 9.35 9 10.45C16.26 20.35 20 15.84 20 11V5.5L11 1z" fill="#e8412a" opacity="0.15" stroke="#e8412a" stroke-width="1.5"/>
+    <path d="M7.5 11l2.5 2.5 5-5" stroke="#22b55a" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
+  </svg>
+  <h1>Secure Analysis Platform</h1>
+  <span class="tag tag-red">Zero Trust</span>
+  <span class="tag tag-blue">mTLS A2A</span>
+  <span class="tag tag-green">Ephemeral µVMs</span>
+  <span class="subtitle scroll-hint">Scroll to explore full architecture ↓</span>
+</header>
+
+<div class="page">
+
+  <!-- ── PIPELINE OVERVIEW ── -->
+  <div class="section-label">01 — Analysis Pipeline</div>
+
+  <div class="pipeline">
+    <div class="pipeline-stage animate" onclick="highlight(this)">
+      <div class="stage-num">STAGE 01</div>
+      <span class="stage-icon">🌐</span>
+      <div class="stage-title">Secure Fetcher</div>
+      <div class="stage-role">repo_cloner.py</div>
+      <div class="stage-arrow">→</div>
+    </div>
+    <div class="pipeline-stage animate" onclick="highlight(this)">
+      <div class="stage-num">STAGE 02</div>
+      <span class="stage-icon">🌳</span>
+      <div class="stage-title">AST Parser</div>
+      <div class="stage-role">analyzer/ast_parser.py</div>
+      <div class="stage-arrow">→</div>
+    </div>
+    <div class="pipeline-stage animate" onclick="highlight(this)">
+      <div class="stage-num">STAGE 03</div>
+      <span class="stage-icon">⚙️</span>
+      <div class="stage-title">IR Builder</div>
+      <div class="stage-role">analyzer/ir_builder.py</div>
+      <div class="stage-arrow">→</div>
+    </div>
+    <div class="pipeline-stage animate" onclick="highlight(this)">
+      <div class="stage-num">STAGE 04</div>
+      <span class="stage-icon">🤖</span>
+      <div class="stage-title">ML Analyzer</div>
+      <div class="stage-role">analyzer/ml_analyzer.py</div>
+      <div class="stage-arrow">→</div>
+    </div>
+    <div class="pipeline-stage animate" onclick="highlight(this)">
+      <div class="stage-num">STAGE 05</div>
+      <span class="stage-icon">⚖️</span>
+      <div class="stage-title">Policy Engine</div>
+      <div class="stage-role">agents/policy_engine.py</div>
+      <div class="stage-arrow">→</div>
+    </div>
+    <div class="pipeline-stage animate" onclick="highlight(this)">
+      <div class="stage-num">STAGE 06</div>
+      <span class="stage-icon">🏗️</span>
+      <div class="stage-title">IaC Generator</div>
+      <div class="stage-role">iac_generator.py</div>
+    </div>
+  </div>
+
+
+  <!-- ── DATA FLOW ── -->
+  <div class="section-label">02 — Data Flow (What Each Agent Sends &amp; Receives)</div>
+
+  <div class="flow-diagram">
+    <div class="flow-line">
+      <span class="fl-agent">ORCHESTRATOR</span>
+      <span class="fl-arrow">──▶ TaskManifest ──▶</span>
+      <span class="fl-data">ALL AGENTS</span>
+      <span class="fl-note">// task_id, repo_url (opaque), priority</span>
+    </div>
+    <div class="fl-divider"></div>
+
+    <div class="flow-line">
+      <span class="fl-agent">GITHUB API</span>
+      <span class="fl-arrow">──▶ raw bytes ──▶</span>
+      <span class="fl-data">SECURE FETCHER</span>
+      <span class="fl-note">// plaintext lifespan: &lt;1ms</span>
+    </div>
+    <div class="flow-line">
+      <span style="padding-left:12px; color:#555">↓ AES-256-GCM encrypt immediately</span>
+    </div>
+    <div class="flow-line">
+      <span class="fl-agent">SECURE FETCHER</span>
+      <span class="fl-arrow">──▶ EncryptedFilePayload ──▶</span>
+      <span class="fl-data">AST PARSER</span>
+      <span class="fl-note">// ciphertext_b64, nonce_b64, encrypted_dek_b64, kek_key_id</span>
+    </div>
+    <div class="flow-line fl-indent">no disk write · no parse · no inspect · file-by-file streaming</div>
+    <div class="fl-divider"></div>
+
+    <div class="flow-line">
+      <span class="fl-agent">AST PARSER</span>
+      <span class="fl-arrow"> decrypt JIT ──▶ parse ──▶ strip semantic</span>
+    </div>
+    <div class="flow-line fl-indent">removes: strings · comments · docstrings · real identifiers (→ SHA-256 hashes)</div>
+    <div class="flow-line">
+      <span class="fl-agent">AST PARSER</span>
+      <span class="fl-arrow">──▶ ASTPayload ──▶</span>
+      <span class="fl-data">IR BUILDER</span>
+      <span class="fl-note">// node_count, depth, complexity, anomaly_flags (no names, no strings)</span>
+    </div>
+    <div class="fl-divider"></div>
+
+    <div class="flow-line">
+      <span class="fl-agent">IR BUILDER</span>
+      <span class="fl-arrow"> ASTNode tree ──▶ language-agnostic IR nodes</span>
+    </div>
+    <div class="flow-line fl-indent">FunctionDef→FUNC_DEF · Import→IMPORT · If→BRANCH · exec→DYNAMIC(risk=9)</span>
+    <div class="flow-line">
+      <span class="fl-agent">IR BUILDER</span>
+      <span class="fl-arrow">──▶ IRPayload ──▶</span>
+      <span class="fl-data">ML ANALYZER</span>
+      <span class="fl-note">// ir_nodes[], dependency_edges[], privilege_count, network_count</span>
+    </div>
+    <div class="fl-divider"></div>
+
+    <div class="flow-line">
+      <span class="fl-agent">ML ANALYZER</span>
+      <span class="fl-arrow"> IR tokens (T1 T4 T16 R3 D12...) ──▶ CodeBERT embeddings</span>
+    </div>
+    <div class="flow-line fl-indent">never sees raw code · structural tokens only · rule-based fallback if model unavailable</div>
+    <div class="flow-line">
+      <span class="fl-agent">ML ANALYZER</span>
+      <span class="fl-arrow">──▶ RiskAssessment ──▶</span>
+      <span class="fl-data">POLICY ENGINE</span>
+      <span class="fl-note">// aggregate_risk, file_scores[], flagged_patterns (IDs not code)</span>
+    </div>
+    <div class="fl-divider"></div>
+
+    <div class="flow-line">
+      <span class="fl-agent">POLICY ENGINE</span>
+      <span class="fl-arrow"> evaluates R001-R006 rules ──▶ confidence check</span>
+    </div>
+    <div class="flow-line fl-indent">if confidence &lt; 0.60: HITLRequest ──▶ Human Operator ──▶ HITLResponse</div>
+    <div class="flow-line">
+      <span class="fl-agent">POLICY ENGINE</span>
+      <span class="fl-arrow">──▶ PolicyDecision ──▶</span>
+      <span class="fl-data">IaC GENERATOR</span>
+      <span class="fl-note">// APPROVE | REJECT | APPROVE_WITH_CONSTRAINTS + terraform_snippets</span>
+    </div>
+    <div class="fl-divider"></div>
+
+    <div class="flow-line">
+      <span class="fl-agent">IaC GENERATOR</span>
+      <span class="fl-arrow"> constraints[] ──▶</span>
+      <span class="fl-data">Terraform + Ansible</span>
+      <span class="fl-note">// network_isolation, sandboxed_execution, privilege_restriction</span>
+    </div>
+  </div>
+
+
+  <!-- ── AGENT DETAIL CARDS ── -->
+  <div class="section-label">03 — Agent Detail</div>
+
+  <div class="agent-grid">
+
+    <!-- Fetcher -->
+    <div class="agent-card animate">
+      <div class="agent-header">
+        <div class="agent-dot pulse" style="background:#2a6fe8"></div>
+        <div class="agent-name">Secure Fetcher</div>
+        <span class="agent-vm">µVM-01</span>
+      </div>
+      <div class="agent-body">
+        <div class="agent-file">src/repo_cloner.py</div>
+        <div class="prop-row"><span class="prop-key">INPUT</span><span class="prop-val">TaskManifest (repo_url)</span></div>
+        <div class="prop-row"><span class="prop-key">OUTPUT</span><span class="prop-val">EncryptedFilePayload ×N</span></div>
+        <div class="prop-row"><span class="prop-key">NETWORK</span><span class="prop-val">GitHub API + KMS only</span></div>
+        <div class="prop-row"><span class="prop-key">FILES</span><span class="prop-val">≤500, ≤10MB each</span></div>
+        <div class="prop-row"><span class="prop-key">STREAM</span><span class="prop-val">AsyncGenerator (no buffer)</span></div>
+        <div class="guarantee">✓ Encrypt-on-fetch: plaintext deleted before next iteration<br>✓ gc.collect() after each file<br>✓ No full git clone — GitHub Trees API</div>
+        <div class="danger">✗ No disk writes<br>✗ No parsing<br>✗ No semantic inspection</div>
+      </div>
+    </div>
+
+    <!-- AST Parser -->
+    <div class="agent-card animate">
+      <div class="agent-header">
+        <div class="agent-dot pulse" style="background:#22b55a"></div>
+        <div class="agent-name">AST Parser</div>
+        <span class="agent-vm">µVM-02</span>
+      </div>
+      <div class="agent-body">
+        <div class="agent-file">src/analyzer/ast_parser.py</div>
+        <div class="prop-row"><span class="prop-key">INPUT</span><span class="prop-val">EncryptedFilePayload</span></div>
+        <div class="prop-row"><span class="prop-key">OUTPUT</span><span class="prop-val">ASTPayload (sanitized)</span></div>
+        <div class="prop-row"><span class="prop-key">DECRYPT</span><span class="prop-val">JIT via contextmanager</span></div>
+        <div class="prop-row"><span class="prop-key">STRIP</span><span class="prop-val">All strings, names→hash</span></div>
+        <div class="prop-row"><span class="prop-key">DETECT</span><span class="prop-val">exec/eval/network flags</span></div>
+        <div class="guarantee">✓ SemanticStrippingVisitor transforms AST before output<br>✓ Identifiers → ID_&lt;sha256[:8]&gt;<br>✓ ctypes.memset on plaintext bytearray</div>
+        <div class="danger">✗ No GitHub access<br>✗ No logs of content<br>✗ No raw code in output</div>
+      </div>
+    </div>
+
+    <!-- IR Builder -->
+    <div class="agent-card animate">
+      <div class="agent-header">
+        <div class="agent-dot pulse" style="background:#bc8cff"></div>
+        <div class="agent-name">IR Builder</div>
+        <span class="agent-vm">µVM-03</span>
+      </div>
+      <div class="agent-body">
+        <div class="agent-file">src/analyzer/ir_builder.py</div>
+        <div class="prop-row"><span class="prop-key">INPUT</span><span class="prop-val">ASTPayload</span></div>
+        <div class="prop-row"><span class="prop-key">OUTPUT</span><span class="prop-val">IRPayload + dep edges</span></div>
+        <div class="prop-row"><span class="prop-key">MAPPING</span><span class="prop-val">AST node → IR type</span></div>
+        <div class="prop-row"><span class="prop-key">RISK</span><span class="prop-val">0–10 per node</span></div>
+        <div class="prop-row"><span class="prop-key">EDGES</span><span class="prop-val">imports/calls/inherits</span></div>
+        <div class="guarantee">✓ Language-agnostic output<br>✓ Non-executable IR nodes<br>✓ exec() → DYNAMIC(risk=9)</div>
+        <div class="danger">✗ No semantic labels<br>✗ No natural language<br>✗ No code forwarded</div>
+      </div>
+    </div>
+
+    <!-- ML Analyzer -->
+    <div class="agent-card animate">
+      <div class="agent-header">
+        <div class="agent-dot pulse" style="background:#d4890a"></div>
+        <div class="agent-name">ML Analyzer</div>
+        <span class="agent-vm">µVM-04</span>
+      </div>
+      <div class="agent-body">
+        <div class="agent-file">src/analyzer/ml_analyzer.py</div>
+        <div class="prop-row"><span class="prop-key">INPUT</span><span class="prop-val">IRPayload</span></div>
+        <div class="prop-row"><span class="prop-key">OUTPUT</span><span class="prop-val">RiskAssessment</span></div>
+        <div class="prop-row"><span class="prop-key">MODEL</span><span class="prop-val">microsoft/codebert-base</span></div>
+        <div class="prop-row"><span class="prop-key">TOKENS</span><span class="prop-val">"T1 T4 T16 R3 D12 DYN"</span></div>
+        <div class="prop-row"><span class="prop-key">FALLBACK</span><span class="prop-val">RuleBasedScorer</span></div>
+        <div class="guarantee">✓ Models see IR structural tokens only<br>✓ 5 score dimensions (struct, dep, priv, obf, backdoor)<br>✓ P90 aggregate risk across files</div>
+        <div class="danger">✗ No raw code to model<br>✗ No strings/comments<br>✗ No natural language</div>
+      </div>
+    </div>
+
+    <!-- Policy Engine -->
+    <div class="agent-card animate">
+      <div class="agent-header">
+        <div class="agent-dot pulse" style="background:#e8412a"></div>
+        <div class="agent-name">Policy Engine</div>
+        <span class="agent-vm">µVM-05</span>
+      </div>
+      <div class="agent-body">
+        <div class="agent-file">src/agents/policy_engine.py</div>
+        <div class="prop-row"><span class="prop-key">INPUT</span><span class="prop-val">RiskAssessment</span></div>
+        <div class="prop-row"><span class="prop-key">OUTPUT</span><span class="prop-val">PolicyDecision</span></div>
+        <div class="prop-row"><span class="prop-key">RULES</span><span class="prop-val">R001–R006 (declarative)</span></div>
+        <div class="prop-row"><span class="prop-key">HITL</span><span class="prop-val">confidence &lt; 0.60</span></div>
+        <div class="prop-row"><span class="prop-key">DECISIONS</span><span class="prop-val">APPROVE / REJECT / +CONSTRAINTS</span></div>
+        <div class="guarantee">✓ No code/AST/IR access — metrics only<br>✓ Terraform snippets attached to constraints<br>✓ Full audit trail in decision</div>
+        <div class="danger">✗ R001 (risk≥0.85) → auto-REJECT<br>✗ R006 (network+eval) → auto-REJECT</div>
+      </div>
+    </div>
+
+    <!-- IaC Generator -->
+    <div class="agent-card animate">
+      <div class="agent-header">
+        <div class="agent-dot pulse" style="background:#6ab0f5"></div>
+        <div class="agent-name">IaC Generator</div>
+        <span class="agent-vm">µVM-06</span>
+      </div>
+      <div class="agent-body">
+        <div class="agent-file">src/iac_generator.py</div>
+        <div class="prop-row"><span class="prop-key">INPUT</span><span class="prop-val">PolicyDecision</span></div>
+        <div class="prop-row"><span class="prop-key">OUTPUT</span><span class="prop-val">Terraform + Ansible</span></div>
+        <div class="prop-row"><span class="prop-key">REQUIRES</span><span class="prop-val">APPROVE decision</span></div>
+        <div class="prop-row"><span class="prop-key">APPLIES</span><span class="prop-val">All constraints from C001–C004</span></div>
+        <div class="prop-row"><span class="prop-key">NSG</span><span class="prop-val">DenyAll + approved endpoints</span></div>
+        <div class="guarantee">✓ Receives policy constraints only<br>✓ No inference over source<br>✓ C002 → read-only rootfs + non-root</div>
+        <div class="danger">✗ No code access<br>✗ Rejects on REJECT decision</div>
+      </div>
+    </div>
+
+  </div>
+
+
+  <!-- ── A2A MESSAGE SCHEMAS ── -->
+  <div class="section-label">04 — A2A Message Schemas</div>
+
+  <div class="cols">
+    <div>
+      <div class="schema-block">
+        <div class="schema-header">
+          EncryptedFilePayload
+          <span style="font-weight:400; font-size:10px; opacity:0.7">Fetcher → Parser</span>
+        </div>
+        <div class="schema-body">
+          <div class="schema-field"><span class="sf-name">header</span><span class="sf-type">A2AHeader</span><span class="sf-note">signed + typed</span></div>
+          <div class="schema-field"><span class="sf-name">ciphertext_b64</span><span class="sf-type">str</span><span class="sf-note">AES-256-GCM ciphertext</span></div>
+          <div class="schema-field"><span class="sf-name">nonce_b64</span><span class="sf-type">str</span><span class="sf-note">96-bit GCM nonce</span></div>
+          <div class="schema-field"><span class="sf-name">encrypted_dek_b64</span><span class="sf-type">str</span><span class="sf-note">RSA-OAEP-256 wrapped DEK</span></div>
+          <div class="schema-field"><span class="sf-name">kek_key_id</span><span class="sf-type">str</span><span class="sf-note">Azure KV key reference</span></div>
+          <div class="schema-field"><span class="sf-name">file_extension</span><span class="sf-type">str</span><span class="sf-note">validated allowlist</span></div>
+          <div class="schema-field"><span class="sf-name">ciphertext_sha256</span><span class="sf-type">str</span><span class="sf-note">integrity hash of ciphertext</span></div>
+          <div class="schema-field"><span class="sf-name">file_index / total_files</span><span class="sf-type">int</span><span class="sf-note">batch position</span></div>
+        </div>
+      </div>
+
+      <div class="schema-block">
+        <div class="schema-header">
+          ASTPayload
+          <span style="font-weight:400; font-size:10px; opacity:0.7">Parser → IR Builder</span>
+        </div>
+        <div class="schema-body">
+          <div class="schema-field"><span class="sf-name">root_node: ASTNode</span><span class="sf-type">tree</span><span class="sf-note">fully anonymized</span></div>
+          <div class="schema-field"><span class="sf-name">node_count / depth</span><span class="sf-type">int</span><span class="sf-note">structural metrics</span></div>
+          <div class="schema-field"><span class="sf-name">cyclomatic_complexity</span><span class="sf-type">int</span><span class="sf-note">McCabe complexity</span></div>
+          <div class="schema-field"><span class="sf-name">import_count</span><span class="sf-type">int</span><span class="sf-note">dependency count</span></div>
+          <div class="schema-field"><span class="sf-name">has_exec_calls</span><span class="sf-type">bool</span><span class="sf-note">anomaly flag</span></div>
+          <div class="schema-field"><span class="sf-name">has_eval_calls</span><span class="sf-type">bool</span><span class="sf-note">anomaly flag</span></div>
+          <div class="schema-field"><span class="sf-name">has_dynamic_imports</span><span class="sf-type">bool</span><span class="sf-note">anomaly flag</span></div>
+          <div class="schema-field"><span class="sf-name">has_network_calls</span><span class="sf-type">bool</span><span class="sf-note">anomaly flag</span></div>
+        </div>
+      </div>
+
+      <div class="schema-block">
+        <div class="schema-header">
+          IRPayload
+          <span style="font-weight:400; font-size:10px; opacity:0.7">IR Builder → ML Analyzer</span>
+        </div>
+        <div class="schema-body">
+          <div class="schema-field"><span class="sf-name">ir_nodes: IRNode[]</span><span class="sf-type">list</span><span class="sf-note">type + category + risk 0–10</span></div>
+          <div class="schema-field"><span class="sf-name">dependency_edges</span><span class="sf-type">list</span><span class="sf-note">imports/calls/inherits/uses</span></div>
+          <div class="schema-field"><span class="sf-name">privilege_sensitive_count</span><span class="sf-type">int</span><span class="sf-note">GLOBAL + PRIVILEGE nodes</span></div>
+          <div class="schema-field"><span class="sf-name">network_call_count</span><span class="sf-type">int</span><span class="sf-note">network category nodes</span></div>
+          <div class="schema-field"><span class="sf-name">io_call_count</span><span class="sf-type">int</span><span class="sf-note">io category nodes</span></div>
+          <div class="schema-field"><span class="sf-name">dynamic_eval_count</span><span class="sf-type">int</span><span class="sf-note">DYNAMIC nodes</span></div>
+        </div>
+      </div>
+    </div>
+
+    <div>
+      <div class="schema-block">
+        <div class="schema-header">
+          RiskAssessment
+          <span style="font-weight:400; font-size:10px; opacity:0.7">ML Analyzer → Policy Engine</span>
+        </div>
+        <div class="schema-body">
+          <div class="schema-field"><span class="sf-name">file_scores: MLRiskScore[]</span><span class="sf-type">list</span><span class="sf-note">per file, 5 dimensions</span></div>
+          <div class="schema-field"><span class="sf-name">aggregate_risk</span><span class="sf-type">float 0–1</span><span class="sf-note">P90 across files</span></div>
+          <div class="schema-field"><span class="sf-name">high_risk_file_count</span><span class="sf-type">int</span><span class="sf-note">files with risk &gt; 0.7</span></div>
+          <div class="schema-field"><span class="sf-name">anomalous_pattern_count</span><span class="sf-type">int</span><span class="sf-note">unique flagged patterns</span></div>
+          <div class="schema-field"><span class="sf-name">privileged_api_count</span><span class="sf-type">int</span><span class="sf-note">total privilege calls</span></div>
+          <div class="schema-field"><span class="sf-name">external_dependency_count</span><span class="sf-type">int</span><span class="sf-note">external imports</span></div>
+        </div>
+      </div>
+
+      <div class="schema-block">
+        <div class="schema-header">
+          PolicyDecision
+          <span style="font-weight:400; font-size:10px; opacity:0.7">Policy Engine → IaC Generator</span>
+        </div>
+        <div class="schema-body">
+          <div class="schema-field"><span class="sf-name">decision</span><span class="sf-type">str</span><span class="sf-note">APPROVE | REJECT | +CONSTRAINTS</span></div>
+          <div class="schema-field"><span class="sf-name">confidence</span><span class="sf-type">float 0–1</span><span class="sf-note">&lt;0.60 triggers HITL</span></div>
+          <div class="schema-field"><span class="sf-name">constraints: PolicyConstraint[]</span><span class="sf-type">list</span><span class="sf-note">with terraform_snippet</span></div>
+          <div class="schema-field"><span class="sf-name">required_mitigations</span><span class="sf-type">str[]</span><span class="sf-note">rule-triggered actions</span></div>
+          <div class="schema-field"><span class="sf-name">rules_evaluated / triggered</span><span class="sf-type">int</span><span class="sf-note">audit counts</span></div>
+          <div class="schema-field"><span class="sf-name">hitl_required</span><span class="sf-type">bool</span><span class="sf-note">human review needed</span></div>
+          <div class="schema-field"><span class="sf-name">risk_summary</span><span class="sf-note" style="color:#555">human-readable, no code refs</span></div>
+        </div>
+      </div>
+
+      <div class="schema-block">
+        <div class="schema-header" style="background:#2a3550">
+          HITLRequest / HITLResponse
+          <span style="font-weight:400; font-size:10px; opacity:0.7">Policy ↔ Human Operator</span>
+        </div>
+        <div class="schema-body">
+          <div class="schema-field"><span class="sf-name">reason</span><span class="sf-type">str</span><span class="sf-note">why escalated</span></div>
+          <div class="schema-field"><span class="sf-name">risk_assessment_summary</span><span class="sf-type">str</span><span class="sf-note">no code, metrics only</span></div>
+          <div class="schema-field"><span class="sf-name">aggregate_risk</span><span class="sf-type">float</span><span class="sf-note">single number</span></div>
+          <div class="schema-field"><span class="sf-name">flagged_patterns</span><span class="sf-type">str[]</span><span class="sf-note">pattern IDs (PATTERN_X), not code</span></div>
+          <div class="schema-field"><span class="sf-name">recommended_action</span><span class="sf-type">str</span><span class="sf-note">APPROVE or REJECT</span></div>
+          <div class="schema-field"><span class="sf-name">expires_at</span><span class="sf-type">float</span><span class="sf-note">1hr expiry then auto-reject</span></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+
+  <!-- ── VM LIFECYCLE ── -->
+  <div class="section-label">05 — MicroVM Lifecycle</div>
+
+  <div class="lifecycle">
+    <div class="lc-step">
+      <span class="lc-icon">📋</span>
+      <div class="lc-title">Task Arrives</div>
+      <div class="lc-note">Orchestrator receives<br>TaskManifest</div>
+    </div>
+    <div class="lc-step">
+      <span class="lc-icon">🔑</span>
+      <div class="lc-title">Cert Generated</div>
+      <div class="lc-note">RSA-4096, 2hr validity<br>CA signs per-VM cert</div>
+    </div>
+    <div class="lc-step">
+      <span class="lc-icon">⚡</span>
+      <div class="lc-title">VM Provisioned</div>
+      <div class="lc-note">Azure Standard_B2s<br>tmpfs only, no disk</div>
+    </div>
+    <div class="lc-step">
+      <span class="lc-icon">🔒</span>
+      <div class="lc-title">Agent Runs</div>
+      <div class="lc-note">mTLS A2A only<br>single responsibility</div>
+    </div>
+    <div class="lc-step">
+      <span class="lc-icon">💥</span>
+      <div class="lc-title">VM Destroyed</div>
+      <div class="lc-note">on: complete · violation<br>anomaly · lifetime exceeded</div>
+    </div>
+  </div>
+
+
+  <!-- ── SECURITY ACCESS MATRIX ── -->
+  <div class="section-label">06 — Zero-Trust Access Matrix</div>
+
+  <div class="matrix">
+    <div class="matrix-row header">
+      <div class="matrix-cell">Agent</div>
+      <div class="matrix-cell">Raw Code</div>
+      <div class="matrix-cell">GitHub</div>
+      <div class="matrix-cell">Disk Write</div>
+      <div class="matrix-cell">Key Vault</div>
+      <div class="matrix-cell">Internet</div>
+    </div>
+    <div class="matrix-row">
+      <div class="matrix-cell"><div class="row-label">Secure Fetcher</div><div class="row-sub">repo_cloner.py</div></div>
+      <div class="matrix-cell" style="justify-content:center"><span class="check-p tooltip-wrap">⚠<div class="tooltip">Briefly in memory only, encrypted &lt;1ms</div></span></div>
+      <div class="matrix-cell" style="justify-content:center"><span class="check-y">✓</span></div>
+      <div class="matrix-cell" style="justify-content:center"><span class="check-n">✗</span></div>
+      <div class="matrix-cell" style="justify-content:center"><span class="check-y tooltip-wrap">✓<div class="tooltip">Encrypt DEK via KMS</div></span></div>
+      <div class="matrix-cell" style="justify-content:center"><span class="check-p tooltip-wrap">▲<div class="tooltip">GitHub + KMS only</div></span></div>
+    </div>
+    <div class="matrix-row">
+      <div class="matrix-cell"><div class="row-label">AST Parser</div><div class="row-sub">ast_parser.py</div></div>
+      <div class="matrix-cell" style="justify-content:center"><span class="check-p tooltip-wrap">⚠<div class="tooltip">JIT decrypt in contextmanager, zeroized after</div></span></div>
+      <div class="matrix-cell" style="justify-content:center"><span class="check-n">✗</span></div>
+      <div class="matrix-cell" style="justify-content:center"><span class="check-n">✗</span></div>
+      <div class="matrix-cell" style="justify-content:center"><span class="check-y tooltip-wrap">✓<div class="tooltip">Decrypt DEK only</div></span></div>
+      <div class="matrix-cell" style="justify-content:center"><span class="check-n">✗</span></div>
+    </div>
+    <div class="matrix-row">
+      <div class="matrix-cell"><div class="row-label">IR Builder</div><div class="row-sub">ir_builder.py</div></div>
+      <div class="matrix-cell" style="justify-content:center"><span class="check-n">✗</span></div>
+      <div class="matrix-cell" style="justify-content:center"><span class="check-n">✗</span></div>
+      <div class="matrix-cell" style="justify-content:center"><span class="check-n">✗</span></div>
+      <div class="matrix-cell" style="justify-content:center"><span class="check-n">✗</span></div>
+      <div class="matrix-cell" style="justify-content:center"><span class="check-n">✗</span></div>
+    </div>
+    <div class="matrix-row">
+      <div class="matrix-cell"><div class="row-label">ML Analyzer</div><div class="row-sub">ml_analyzer.py</div></div>
+      <div class="matrix-cell" style="justify-content:center"><span class="check-n">✗</span></div>
+      <div class="matrix-cell" style="justify-content:center"><span class="check-n">✗</span></div>
+      <div class="matrix-cell" style="justify-content:center"><span class="check-n">✗</span></div>
+      <div class="matrix-cell" style="justify-content:center"><span class="check-n">✗</span></div>
+      <div class="matrix-cell" style="justify-content:center"><span class="check-p tooltip-wrap">▲<div class="tooltip">HuggingFace model download (one-time)</div></span></div>
+    </div>
+    <div class="matrix-row">
+      <div class="matrix-cell"><div class="row-label">Policy Engine</div><div class="row-sub">policy_engine.py</div></div>
+      <div class="matrix-cell" style="justify-content:center"><span class="check-n">✗</span></div>
+      <div class="matrix-cell" style="justify-content:center"><span class="check-n">✗</span></div>
+      <div class="matrix-cell" style="justify-content:center"><span class="check-n">✗</span></div>
+      <div class="matrix-cell" style="justify-content:center"><span class="check-n">✗</span></div>
+      <div class="matrix-cell" style="justify-content:center"><span class="check-n">✗</span></div>
+    </div>
+    <div class="matrix-row">
+      <div class="matrix-cell"><div class="row-label">IaC Generator</div><div class="row-sub">iac_generator.py</div></div>
+      <div class="matrix-cell" style="justify-content:center"><span class="check-n">✗</span></div>
+      <div class="matrix-cell" style="justify-content:center"><span class="check-n">✗</span></div>
+      <div class="matrix-cell" style="justify-content:center"><span class="check-y tooltip-wrap">✓<div class="tooltip">Terraform/Ansible file output only</div></span></div>
+      <div class="matrix-cell" style="justify-content:center"><span class="check-n">✗</span></div>
+      <div class="matrix-cell" style="justify-content:center"><span class="check-n">✗</span></div>
+    </div>
+  </div>
+
+
+  <!-- ── THREAT MODEL ── -->
+  <div class="section-label">07 — Threat Model &amp; Defenses</div>
+
+  <div class="threat-grid">
+    <div class="threat-card">
+      <div class="threat-head">❌ Semantic Injection</div>
+      <div class="threat-body">
+        <b>Attack:</b> Embed malicious instructions in code strings, comments, or docstrings to influence AI decisions.<br><br>
+        <strong>Defense:</strong> SemanticStrippingVisitor removes all string literals and docstrings before any agent sees the AST. Comments are never present (stripped by ast.parse). Identifiers hashed.
+      </div>
+    </div>
+    <div class="threat-card">
+      <div class="threat-head">❌ Structural Bias</div>
+      <div class="threat-body">
+        <b>Attack:</b> Craft code with unusual structural patterns that manipulate ML risk scoring.<br><br>
+        <strong>Defense:</strong> IR complexity analysis + rule-based baseline alongside ML scoring. Both must agree before high-confidence APPROVE.
+      </div>
+    </div>
+    <div class="threat-card">
+      <div class="threat-head">❌ Dependency Influence</div>
+      <div class="threat-body">
+        <b>Attack:</b> Import benign-looking packages that perform malicious actions at install time.<br><br>
+        <strong>Defense:</strong> Dependency graph analysis. R004 triggers on high privileged API count. R006 auto-rejects network+eval combination.
+      </div>
+    </div>
+    <div class="threat-card">
+      <div class="threat-head">❌ Plaintext Exfiltration</div>
+      <div class="threat-body">
+        <b>Attack:</b> Intercept in-memory plaintext by dumping VM memory or exploiting agent bugs.<br><br>
+        <strong>Defense:</strong> ctypes.memset zeroizes all plaintext bytearray buffers. contextmanager scope guarantees. tmpfs-only storage. eBPF syscall monitoring optional.
+      </div>
+    </div>
+    <div class="threat-card">
+      <div class="threat-head">❌ Agent Compromise</div>
+      <div class="threat-body">
+        <b>Attack:</b> Compromise one agent to pivot to other agents or access full code.<br><br>
+        <strong>Defense:</strong> No shared state. No shared memory. Each agent in isolated µVM with unique mTLS cert. Violation → immediate VM termination.
+      </div>
+    </div>
+    <div class="threat-card">
+      <div class="threat-head">❌ Cert / Key Theft</div>
+      <div class="threat-body">
+        <b>Attack:</b> Steal TLS certs or encryption keys from a running VM.<br><br>
+        <strong>Defense:</strong> Certs have 2hr validity. DEKs per-file, zeroized after use. KEK in Azure Key Vault RBAC-scoped. Cert revoked on VM teardown.
+      </div>
+    </div>
+  </div>
+
+
+  <!-- ── FILE TREE ── -->
+  <div class="section-label">08 — Project File Structure</div>
+
+  <div class="filetree"><span class="ft-dir">secure-analysis-platform/</span>
+├── <span class="ft-dir">config/</span>
+│   ├── __init__.py
+│   └── <span class="ft-hot">azure_config.py</span>          <span class="ft-note">// AzureConfig + AgentConfig frozen dataclasses</span>
+├── <span class="ft-dir">logs/</span>
+│   └── .gitkeep                  <span class="ft-note">// no runtime logs written here</span>
+├── <span class="ft-dir">src/</span>
+│   ├── <span class="ft-dir">schemas/</span>
+│   │   └── <span class="ft-hot">a2a_schemas.py</span>         <span class="ft-note">// ALL A2A message contracts (Pydantic)</span>
+│   ├── <span class="ft-dir">analyzer/</span>
+│   │   ├── <span class="ft-hot">ast_parser.py</span>          <span class="ft-note">// semantic stripping + anomaly detection</span>
+│   │   ├── <span class="ft-hot">ir_builder.py</span>          <span class="ft-note">// AST → language-agnostic IR</span>
+│   │   └── <span class="ft-hot">ml_analyzer.py</span>         <span class="ft-note">// CodeBERT on IR tokens + rule-based</span>
+│   ├── <span class="ft-dir">security/</span>
+│   │   └── <span class="ft-hot">mtls.py</span>                <span class="ft-note">// TLS1.3 server/client + cert generation</span>
+│   ├── <span class="ft-dir">agents/</span>
+│   │   └── <span class="ft-hot">policy_engine.py</span>       <span class="ft-note">// rules R001–R006 + HITL escalation</span>
+│   ├── <span class="ft-hot">key_management.py</span>          <span class="ft-note">// envelope encryption + ctypes zeroize</span>
+│   ├── <span class="ft-hot">repo_cloner.py</span>             <span class="ft-note">// secure fetcher agent</span>
+│   ├── <span class="ft-file">parser.py</span>                  <span class="ft-note">// Dispatch layer — the only entry point for all language parsing. It routes by file extension to one of 10 language-specific parsers:</span>
+│   ├── <span class="ft-hot">azure_setup.py</span>             <span class="ft-note">// µVM orchestrator (provision + destroy)</span>
+│   └── <span class="ft-file">main.py</span>                    <span class="ft-note">// pipeline coordinator</span>
+├── <span class="ft-dir">ui/</span>
+│   └── <span class="ft-hot">monitor.py</span>                 <span class="ft-note">// FastAPI + WebSocket dashboard</span>
+├── <span class="ft-dir">tests/</span>
+│   └── <span class="ft-file">test_azure_setup.py</span>        <span class="ft-note">// unit tests (no Azure creds needed)</span>
+├── <span class="ft-file">run.py</span>                         <span class="ft-note">// entrypoint: monitor or --analyze URL</span>
+├── <span class="ft-file">.env</span>
+└── <span class="ft-file">requirements.txt</span></div>
+
+  <div style="height:40px"></div>
+
+  <!-- ── LEGEND ── -->
+  <div style="display:flex; gap:24px; font-size:11px; color:var(--muted); border-top:1px solid var(--border); padding-top:20px; margin-top:8px; flex-wrap:wrap;">
+    <span>✓ = Allowed &nbsp;|&nbsp; ✗ = Blocked &nbsp;|&nbsp; ⚠ = Conditional &nbsp;|&nbsp; ▲ = Limited</span>
+    <span style="margin-left:auto">Click pipeline stages to highlight &nbsp;·&nbsp; Hover ⚠▲ for details</span>
+  </div>
+
+</div>
+
+<script>
+function highlight(el) {
+  document.querySelectorAll('.pipeline-stage').forEach(s => s.classList.remove('active'));
+  el.classList.add('active');
+  setTimeout(() => el.classList.remove('active'), 2000);
+}
+
+// Animate on scroll
+const obs = new IntersectionObserver((entries) => {
+  entries.forEach(e => {
+    if (e.isIntersecting) {
+      e.target.style.opacity = '1';
+      e.target.style.transform = 'translateY(0)';
+    }
+  });
+}, { threshold: 0.1 });
+
+document.querySelectorAll('.agent-card, .threat-card, .schema-block').forEach(el => {
+  el.style.opacity = '0';
+  el.style.transform = 'translateY(12px)';
+  el.style.transition = 'opacity 0.4s ease, transform 0.4s ease';
+  obs.observe(el);
+});
+</script>
+</body>
+</html>
