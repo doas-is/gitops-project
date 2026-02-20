@@ -1,0 +1,562 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Secure Analysis Pipeline</title>
+<link href="https://fonts.googleapis.com/css2?family=Syne:wght@400;700;800&family=DM+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+:root {
+  --ink: #0a0a0f;
+  --paper: #f5f3ef;
+  --paper2: #ede9e3;
+  --line: #d4cfc7;
+  --accent: #1a1a2e;
+
+  --c1: #e8f4f8;  --c1d: #2d7d9a;  /* fetch   – teal */
+  --c2: #f0f7ee;  --c2d: #3a7d44;  /* parse   – green */
+  --c3: #f5f0fa;  --c3d: #7b5ea7;  /* ir      – purple */
+  --c4: #fff8ec;  --c4d: #c07828;  /* ml      – amber */
+  --c5: #fdf0f0;  --c5d: #c0392b;  /* policy  – red */
+  --c6: #edf5ff;  --c6d: #2563b0;  /* strategy– blue */
+  --c7: #f0faf5;  --c7d: #1e7a5a;  /* iac     – emerald */
+  --c8: #fff5f8;  --c8d: #b5366b;  /* deploy  – rose */
+}
+
+html { scroll-behavior: smooth; }
+
+body {
+  background: var(--paper);
+  color: var(--ink);
+  font-family: 'Syne', sans-serif;
+  min-height: 100vh;
+  padding: 0;
+  overflow-x: hidden;
+}
+
+/* ─── GRAIN TEXTURE ─── */
+body::before {
+  content: '';
+  position: fixed; inset: 0; z-index: 0; pointer-events: none;
+  background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='noise'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23noise)' opacity='0.04'/%3E%3C/svg%3E");
+  background-size: 256px 256px;
+}
+
+/* ─── LAYOUT ─── */
+.wrap {
+  position: relative; z-index: 1;
+  max-width: 860px;
+  margin: 0 auto;
+  padding: 60px 32px 100px;
+}
+
+/* ─── HEADER ─── */
+.hdr {
+  display: flex; align-items: flex-start; justify-content: space-between;
+  margin-bottom: 64px;
+  padding-bottom: 32px;
+  border-bottom: 1.5px solid var(--line);
+}
+.hdr-left h1 {
+  font-size: clamp(28px, 5vw, 42px);
+  font-weight: 800;
+  line-height: 1.05;
+  letter-spacing: -1.5px;
+}
+.hdr-left h1 em {
+  font-style: normal;
+  background: linear-gradient(135deg, var(--c1d), var(--c3d), var(--c8d));
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+}
+.hdr-left p {
+  margin-top: 10px;
+  font-size: 13px;
+  color: #888;
+  letter-spacing: .3px;
+  font-family: 'DM Mono', monospace;
+}
+.hdr-badge {
+  display: flex; flex-direction: column; align-items: flex-end; gap: 6px;
+  flex-shrink: 0;
+}
+.badge {
+  font-family: 'DM Mono', monospace;
+  font-size: 10px;
+  padding: 4px 10px;
+  border-radius: 99px;
+  border: 1px solid var(--line);
+  color: #777;
+  letter-spacing: .4px;
+  white-space: nowrap;
+}
+
+/* ─── PIPELINE ─── */
+.pipeline {
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+}
+
+/* ─── STAGE ─── */
+.stage {
+  display: grid;
+  grid-template-columns: 48px 1fr;
+  gap: 0 24px;
+  position: relative;
+  opacity: 0;
+  transform: translateY(24px);
+  animation: fadeUp .5s ease forwards;
+}
+
+/* stagger */
+.stage:nth-child(1)  { animation-delay: .05s; }
+.stage:nth-child(2)  { animation-delay: .12s; }
+.stage:nth-child(3)  { animation-delay: .19s; }
+.stage:nth-child(4)  { animation-delay: .26s; }
+.stage:nth-child(5)  { animation-delay: .33s; }
+.stage:nth-child(6)  { animation-delay: .40s; }
+.stage:nth-child(7)  { animation-delay: .47s; }
+.stage:nth-child(8)  { animation-delay: .54s; }
+
+@keyframes fadeUp {
+  to { opacity: 1; transform: none; }
+}
+
+/* ─── LEFT COLUMN: spine + node ─── */
+.stage-spine {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+}
+
+.node {
+  width: 48px; height: 48px;
+  border-radius: 14px;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 20px;
+  flex-shrink: 0;
+  position: relative;
+  z-index: 2;
+  border: 1.5px solid transparent;
+  transition: transform .2s, box-shadow .2s;
+  cursor: default;
+}
+.stage:hover .node {
+  transform: scale(1.08);
+  box-shadow: 0 8px 24px rgba(0,0,0,.12);
+}
+
+.connector {
+  width: 2px;
+  flex: 1;
+  min-height: 24px;
+  background: repeating-linear-gradient(
+    to bottom,
+    var(--line) 0, var(--line) 5px,
+    transparent 5px, transparent 10px
+  );
+  margin: 2px 0;
+}
+.stage:last-child .connector { display: none; }
+
+/* ─── RIGHT COLUMN: card ─── */
+.card {
+  margin-bottom: 24px;
+  padding: 20px 22px;
+  border-radius: 16px;
+  border: 1.5px solid var(--line);
+  background: white;
+  position: relative;
+  overflow: hidden;
+  transition: box-shadow .2s, border-color .2s, transform .2s;
+  cursor: default;
+}
+.stage:hover .card {
+  box-shadow: 0 12px 36px rgba(0,0,0,.09);
+  transform: translateX(4px);
+}
+
+/* accent strip */
+.card::before {
+  content: '';
+  position: absolute; left: 0; top: 0; bottom: 0;
+  width: 3px;
+  border-radius: 3px 0 0 3px;
+}
+
+/* background shape */
+.card::after {
+  content: '';
+  position: absolute; right: -20px; top: -20px;
+  width: 120px; height: 120px;
+  border-radius: 50%;
+  opacity: .06;
+}
+
+.card-top {
+  display: flex; align-items: center; gap: 10px;
+  margin-bottom: 8px;
+}
+.step-num {
+  font-family: 'DM Mono', monospace;
+  font-size: 10px;
+  font-weight: 500;
+  letter-spacing: 1px;
+  opacity: .45;
+}
+.agent-name {
+  font-size: 15px;
+  font-weight: 700;
+  letter-spacing: -.3px;
+}
+.role-tag {
+  margin-left: auto;
+  font-family: 'DM Mono', monospace;
+  font-size: 9px;
+  padding: 3px 9px;
+  border-radius: 99px;
+  font-weight: 500;
+  letter-spacing: .3px;
+  white-space: nowrap;
+}
+
+.card-desc {
+  font-size: 12.5px;
+  line-height: 1.65;
+  color: #555;
+  max-width: 520px;
+}
+.card-desc strong {
+  color: var(--ink);
+  font-weight: 600;
+}
+
+/* io row */
+.io-row {
+  display: flex; gap: 6px;
+  margin-top: 12px;
+  flex-wrap: wrap;
+}
+.io-pill {
+  font-family: 'DM Mono', monospace;
+  font-size: 9.5px;
+  padding: 3px 9px;
+  border-radius: 6px;
+  background: var(--paper2);
+  color: #666;
+  display: flex; align-items: center; gap: 4px;
+}
+.io-pill .arrow { opacity: .5; }
+
+/* ─── PER-STAGE COLORS ─── */
+/* 1 fetch */   .s1 .node { background:var(--c1); border-color:var(--c1d); }
+                .s1 .card::before { background:var(--c1d); }
+                .s1 .card::after { background:var(--c1d); }
+                .s1 .role-tag { background:var(--c1); color:var(--c1d); border:1px solid var(--c1d)30; }
+/* 2 parse */   .s2 .node { background:var(--c2); border-color:var(--c2d); }
+                .s2 .card::before { background:var(--c2d); }
+                .s2 .card::after { background:var(--c2d); }
+                .s2 .role-tag { background:var(--c2); color:var(--c2d); border:1px solid var(--c2d)30; }
+/* 3 ir */      .s3 .node { background:var(--c3); border-color:var(--c3d); }
+                .s3 .card::before { background:var(--c3d); }
+                .s3 .card::after { background:var(--c3d); }
+                .s3 .role-tag { background:var(--c3); color:var(--c3d); border:1px solid var(--c3d)30; }
+/* 4 ml */      .s4 .node { background:var(--c4); border-color:var(--c4d); }
+                .s4 .card::before { background:var(--c4d); }
+                .s4 .card::after { background:var(--c4d); }
+                .s4 .role-tag { background:var(--c4); color:var(--c4d); border:1px solid var(--c4d)30; }
+/* 5 policy */  .s5 .node { background:var(--c5); border-color:var(--c5d); }
+                .s5 .card::before { background:var(--c5d); }
+                .s5 .card::after { background:var(--c5d); }
+                .s5 .role-tag { background:var(--c5); color:var(--c5d); border:1px solid var(--c5d)30; }
+/* 6 strategy */.s6 .node { background:var(--c6); border-color:var(--c6d); }
+                .s6 .card::before { background:var(--c6d); }
+                .s6 .card::after { background:var(--c6d); }
+                .s6 .role-tag { background:var(--c6); color:var(--c6d); border:1px solid var(--c6d)30; }
+/* 7 iac */     .s7 .node { background:var(--c7); border-color:var(--c7d); }
+                .s7 .card::before { background:var(--c7d); }
+                .s7 .card::after { background:var(--c7d); }
+                .s7 .role-tag { background:var(--c7); color:var(--c7d); border:1px solid var(--c7d)30; }
+/* 8 deploy */  .s8 .node { background:var(--c8); border-color:var(--c8d); }
+                .s8 .card::before { background:var(--c8d); }
+                .s8 .card::after { background:var(--c8d); }
+                .s8 .role-tag { background:var(--c8); color:var(--c8d); border:1px solid var(--c8d)30; }
+
+/* ─── SECURITY CALLOUT ─── */
+.security-row {
+  display: flex; gap: 10px; flex-wrap: wrap;
+  margin-top: 56px;
+  padding-top: 32px;
+  border-top: 1.5px solid var(--line);
+  opacity: 0;
+  animation: fadeUp .5s ease .65s forwards;
+}
+.sec-chip {
+  display: flex; align-items: center; gap: 7px;
+  font-family: 'DM Mono', monospace;
+  font-size: 10px;
+  padding: 7px 12px;
+  border-radius: 10px;
+  border: 1px solid var(--line);
+  background: white;
+  color: #555;
+  letter-spacing: .2px;
+}
+.sec-dot {
+  width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0;
+}
+
+/* ─── FOOTER ─── */
+.footer {
+  margin-top: 32px;
+  font-family: 'DM Mono', monospace;
+  font-size: 10px;
+  color: #bbb;
+  letter-spacing: .3px;
+  text-align: right;
+  opacity: 0;
+  animation: fadeUp .4s ease .75s forwards;
+}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <!-- HEADER -->
+  <div class="hdr">
+    <div class="hdr-left">
+      <h1>Secure Analysis<br><em>Pipeline</em></h1>
+      <p>github repo → zero-trust analysis → IaC deployment</p>
+    </div>
+    <div class="hdr-badge">
+      <span class="badge">8 agents</span>
+      <span class="badge">8 µVMs</span>
+      <span class="badge">ephemeral</span>
+    </div>
+  </div>
+
+  <!-- PIPELINE -->
+  <div class="pipeline">
+
+    <!-- 1 FETCH -->
+    <div class="stage s1">
+      <div class="stage-spine">
+        <div class="node">🌐</div>
+        <div class="connector"></div>
+      </div>
+      <div class="card">
+        <div class="card-top">
+          <span class="step-num">01</span>
+          <span class="agent-name">Secure Fetcher</span>
+          <span class="role-tag">secure_fetcher</span>
+        </div>
+        <p class="card-desc">
+          Clones the repository via GitHub API.
+          Each file is <strong>AES-256-GCM encrypted immediately</strong> in memory —
+          plaintext lifetime under 1 ms, never written to disk.
+        </p>
+        <div class="io-row">
+          <span class="io-pill">🔗 GitHub URL</span>
+          <span class="io-pill arrow">→</span>
+          <span class="io-pill">🔒 EncryptedFilePayload ×N</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- 2 PARSE -->
+    <div class="stage s2">
+      <div class="stage-spine">
+        <div class="node">🌳</div>
+        <div class="connector"></div>
+      </div>
+      <div class="card">
+        <div class="card-top">
+          <span class="step-num">02</span>
+          <span class="agent-name">AST Parser</span>
+          <span class="role-tag">ast_parser</span>
+        </div>
+        <p class="card-desc">
+          Decrypts each file JIT. <strong>Strips all strings, comments and docstrings.</strong>
+          Hashes every identifier with SHA-256. Emits a sanitised syntax tree —
+          no semantic content survives.
+        </p>
+        <div class="io-row">
+          <span class="io-pill">🔒 Encrypted bytes</span>
+          <span class="io-pill arrow">→</span>
+          <span class="io-pill">🌳 ASTPayload (sanitised)</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- 3 IR -->
+    <div class="stage s3">
+      <div class="stage-spine">
+        <div class="node">⚙️</div>
+        <div class="connector"></div>
+      </div>
+      <div class="card">
+        <div class="card-top">
+          <span class="step-num">03</span>
+          <span class="agent-name">IR Builder</span>
+          <span class="role-tag">ir_builder</span>
+        </div>
+        <p class="card-desc">
+          Converts the sanitised AST into a <strong>language-agnostic IR</strong>
+          using 28 structural token types (MODULE, CALL, DYNAMIC, NETWORK…).
+          Builds a dependency graph with weighted edges.
+        </p>
+        <div class="io-row">
+          <span class="io-pill">🌳 ASTPayload</span>
+          <span class="io-pill arrow">→</span>
+          <span class="io-pill">⚙️ IRPayload + DependencyGraph</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- 4 ML -->
+    <div class="stage s4">
+      <div class="stage-spine">
+        <div class="node">🤖</div>
+        <div class="connector"></div>
+      </div>
+      <div class="card">
+        <div class="card-top">
+          <span class="step-num">04</span>
+          <span class="agent-name">ML Analyzer</span>
+          <span class="role-tag">ml_analyzer</span>
+        </div>
+        <p class="card-desc">
+          Three-layer ensemble: <strong>rule engine + fine-tuned GraphCodeBERT + ensemble scorer.</strong>
+          Scores 5 risk dimensions (backdoor, exfil, privesc, obfuscation, dep-abuse).
+          Outputs P90 aggregate risk.
+        </p>
+        <div class="io-row">
+          <span class="io-pill">⚙️ IRPayload ×N</span>
+          <span class="io-pill arrow">→</span>
+          <span class="io-pill">📊 RiskAssessment</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- 5 POLICY -->
+    <div class="stage s5">
+      <div class="stage-spine">
+        <div class="node">⚖️</div>
+        <div class="connector"></div>
+      </div>
+      <div class="card">
+        <div class="card-top">
+          <span class="step-num">05</span>
+          <span class="agent-name">Policy Engine</span>
+          <span class="role-tag">policy_engine</span>
+        </div>
+        <p class="card-desc">
+          Evaluates 6 deterministic rules against the risk assessment.
+          Returns <strong>APPROVE / REJECT / APPROVE_WITH_CONSTRAINTS.</strong>
+          Escalates to HITL when confidence falls below 60 %.
+        </p>
+        <div class="io-row">
+          <span class="io-pill">📊 RiskAssessment</span>
+          <span class="io-pill arrow">→</span>
+          <span class="io-pill">✅ PolicyDecision + Constraints</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- 6 STRATEGY -->
+    <div class="stage s6">
+      <div class="stage-spine">
+        <div class="node">🗺️</div>
+        <div class="connector"></div>
+      </div>
+      <div class="card">
+        <div class="card-top">
+          <span class="step-num">06</span>
+          <span class="agent-name">Strategy Agent</span>
+          <span class="role-tag">strategy_agent</span>
+        </div>
+        <p class="card-desc">
+          Reads IR metrics and policy constraints to pick a deployment method:
+          <strong>Declarative</strong> (Terraform + Ansible) for clean approvals,
+          <strong>Imperative</strong> (az CLI) for high-risk or HITL cases,
+          <strong>Hybrid</strong> when constraints are present.
+        </p>
+        <div class="io-row">
+          <span class="io-pill">✅ PolicyDecision</span>
+          <span class="io-pill arrow">→</span>
+          <span class="io-pill">🗺️ StrategyDecision</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- 7 IaC -->
+    <div class="stage s7">
+      <div class="stage-spine">
+        <div class="node">📄</div>
+        <div class="connector"></div>
+      </div>
+      <div class="card">
+        <div class="card-top">
+          <span class="step-num">07</span>
+          <span class="agent-name">IaC Generator</span>
+          <span class="role-tag">iac_generator</span>
+        </div>
+        <p class="card-desc">
+          Produces <strong>Terraform (.tf) + Ansible (.yml)</strong> from constraints and strategy.
+          Hardcodes NSG deny-all, sandboxed containers, monitoring alerts —
+          all derived from policy output, never from code content.
+        </p>
+        <div class="io-row">
+          <span class="io-pill">🗺️ StrategyDecision</span>
+          <span class="io-pill arrow">→</span>
+          <span class="io-pill">📄 IaCBundle (TF + Ansible)</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- 8 DEPLOY -->
+    <div class="stage s8">
+      <div class="stage-spine">
+        <div class="node">🚀</div>
+        <div class="connector"></div>
+      </div>
+      <div class="card">
+        <div class="card-top">
+          <span class="step-num">08</span>
+          <span class="agent-name">Deployment Agent</span>
+          <span class="role-tag">deployment_agent</span>
+        </div>
+        <p class="card-desc">
+          Applies the IaC bundle to Azure. Verifies deployment health.
+          <strong>Self-destructs its µVM on completion.</strong>
+          All other VMs are then purged. Only the audit log survives.
+        </p>
+        <div class="io-row">
+          <span class="io-pill">📄 IaCBundle</span>
+          <span class="io-pill arrow">→</span>
+          <span class="io-pill">☁️ Azure resources + 🗑️ teardown</span>
+        </div>
+      </div>
+    </div>
+
+  </div>
+
+  <!-- SECURITY CHIPS -->
+  <div class="security-row">
+    <div class="sec-chip"><span class="sec-dot" style="background:#2d7d9a"></span>AES-256-GCM per file</div>
+    <div class="sec-chip"><span class="sec-dot" style="background:#7b5ea7"></span>mTLS 1.3 between agents</div>
+    <div class="sec-chip"><span class="sec-dot" style="background:#3a7d44"></span>Identifiers SHA-256 hashed</div>
+    <div class="sec-chip"><span class="sec-dot" style="background:#c07828"></span>NSG deny-all default</div>
+    <div class="sec-chip"><span class="sec-dot" style="background:#c0392b"></span>HITL escalation &lt; 60 % conf</div>
+    <div class="sec-chip"><span class="sec-dot" style="background:#b5366b"></span>Ephemeral µVMs · append-only log</div>
+  </div>
+
+  <div class="footer">secure-analysis-platform · zero-trust · 2025</div>
+
+</div>
+</body>
+</html>

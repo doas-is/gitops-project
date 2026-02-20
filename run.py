@@ -5,9 +5,6 @@ Launch the Secure Analysis Platform with monitoring dashboard.
 Usage:
   python run.py             # Start monitor on port 8000
   python run.py --analyze   # Run analysis + monitor
-
-  # Generate 5000 synthetic IR samples and fine-tune
-    python -m src.analyzer.model_trainer --samples 5000 --epochs-p1 10 --epochs-p2 5
 """
 import argparse
 import asyncio
@@ -17,7 +14,7 @@ import sys
 # Ensure src is importable
 sys.path.insert(0, os.path.dirname(__file__))
 
-os.environ.setdefault("KMS_LOCAL", "true")
+os.environ.setdefault("KMS_LOCAL", "false")
 
 
 def run_monitor():
@@ -28,7 +25,7 @@ def run_monitor():
     port = int(os.getenv("MONITOR_PORT", "8000"))
     host = os.getenv("MONITOR_HOST", "0.0.0.0")
 
-    print(f"Secure Analysis Platform Monitor")
+    print(f"🔒 Secure Analysis Platform Monitor")
     print(f"   Dashboard: http://localhost:{port}")
     print(f"   API Docs:  http://localhost:{port}/docs")
     print()

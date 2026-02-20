@@ -1,524 +1,616 @@
 """
-Static ML Security Analyzer
+IaC Generator Agent  —  src/agents/iac_generator.py
 
-Three-layer scoring architecture:
-  Layer 1: RuleBasedScorer   — deterministic, zero dependencies, always runs
-  Layer 2: HFSecurityAnalyzer — fine-tuned GraphCodeBERT/CodeBERT, loads lazily
-  Layer 3: EnsembleScorer    — combines L1 + L2 with confidence weighting
+Receives: PolicyDecision + StrategyDecision
+Produces: IaCBundle — Terraform (.tf) + Ansible (.yml) as in-memory strings
 
-Input contract (STRICT):
-  - Receives IRPayload only — no raw code, no AST, no strings
-  - IR token sequences are structural IDs: "MODULE IMPORT FUNC_DEF CALL DYNAMIC"
-  - 45-dim feature vectors are structural metrics only
+Security contract:
+  • Never sees raw code, AST, or IR — only constraint names + strategy metadata
+  • All generated files are held in memory; the Deployment Agent applies them
+  • client_secret is NEVER a Terraform variable — it is read from Key Vault at runtime
+  • NSG priorities are unique and validated before generation
 
-Output: MLRiskScore with 5 risk dimensions + overall + confidence
-
-Security invariant:
-  At no point does any model object receive identifiers, string literals,
-  comments, docstrings, or any user-controlled text. Only IR type names
-  from a fixed vocabulary of 28 tokens are used.
+Fixes vs. prior version:
+  • Duplicate priority 4096 on DenyAllInbound/DenyAllOutbound → unique (4094/4095)
+  • client_secret removed from variables.tf — sourced from Key Vault at runtime
+  • var.action_group_id declared in variables.tf (was referenced but undefined)
+  • var.allowed_cidr tightened to 10.0.0.0/8 default instead of 0.0.0.0/0
+  • Terraform container resource: added depends_on subnet_nsg_association
+  • Ansible: restart sshd handler added; missing handlers block was an error
+  • Imperative script: DenyAllOutbound rule added (was missing outbound deny)
+  • Private endpoint resource added for network_isolation constraint
+  • RBAC Reader assignment added for privilege_restriction constraint
+  • Container liveness probe + environment variable block added
 """
 from __future__ import annotations
 
 import logging
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Dict, List, Optional
-
-import numpy as np
-
-from src.schemas.a2a_schemas import (
-    AgentRole, IRPayload, MessageType, MLRiskScore,
-    RiskAssessment, create_header,
-)
 
 logger = logging.getLogger(__name__)
 
-# IR vocabulary — matches ir_builder.py _AST_TO_IR values
-IR_VOCAB = [
-    "MODULE", "FUNC_DEF", "CLASS_DEF", "IMPORT", "CALL",
-    "BRANCH", "LOOP", "ASSIGN", "RETURN", "RAISE",
-    "TRY", "CATCH", "CONTEXT", "GLOBAL", "NONLOCAL",
-    "DYNAMIC", "PRIVILEGE", "AWAIT", "YIELD", "LAMBDA",
-    "COMPREHENSION", "ASSERT", "DELETE", "IO", "NETWORK",
-    "EXPR", "TRUNCATED", "MATCH",
-]
-_IR_TOKEN_MAP: Dict[str, int] = {t: i for i, t in enumerate(IR_VOCAB)}
-_MAX_TOKEN = len(IR_VOCAB)
-
-# Risk weights per IR type (used in feature extraction)
-_TOKEN_RISK: Dict[str, float] = {
-    "MODULE": 0.0, "FUNC_DEF": 0.1, "CLASS_DEF": 0.1,
-    "IMPORT": 0.2, "CALL": 0.2, "BRANCH": 0.1, "LOOP": 0.1,
-    "ASSIGN": 0.0, "RETURN": 0.0, "RAISE": 0.2,
-    "TRY": 0.1, "CATCH": 0.1, "CONTEXT": 0.1,
-    "GLOBAL": 0.6, "NONLOCAL": 0.4,
-    "DYNAMIC": 0.9, "PRIVILEGE": 0.8,
-    "AWAIT": 0.1, "YIELD": 0.1, "LAMBDA": 0.3,
-    "COMPREHENSION": 0.1, "ASSERT": 0.0,
-    "DELETE": 0.3, "IO": 0.4, "NETWORK": 0.5,
-    "EXPR": 0.0, "TRUNCATED": 0.1, "MATCH": 0.1,
-}
-
-
-# Feature Extraction
 
 @dataclass
-class IRFeatureVector:
-    """45-dim structural feature vector — NO semantic content."""
-    # 28-dim: normalized token frequency histogram
-    token_histogram: np.ndarray
-    # 17-dim: structural metrics
-    total_nodes: int
-    max_depth: int
-    avg_children: float
-    mean_risk: float
-    max_risk: float
-    high_risk_ratio: float
-    control_flow_ratio: float
-    io_ratio: float
-    network_ratio: float
-    privilege_ratio: float
-    dependency_ratio: float
-    has_dynamic: bool
-    has_global_scope: bool
-    edge_count: int
-    avg_edge_weight: float
-    max_edge_weight: float
-    has_privilege: bool
-
-    def to_vector(self) -> np.ndarray:
-        """Flatten to 45-dim float32 array."""
-        scalar = np.array([
-            self.total_nodes / 200.0,
-            self.max_depth / 50.0,
-            self.avg_children / 10.0,
-            self.mean_risk,
-            self.max_risk,
-            self.high_risk_ratio,
-            self.control_flow_ratio,
-            self.io_ratio,
-            self.network_ratio,
-            self.privilege_ratio,
-            self.dependency_ratio,
-            float(self.has_dynamic),
-            float(self.has_global_scope),
-            self.edge_count / 500.0,
-            self.avg_edge_weight / 2.0,
-            self.max_edge_weight / 2.0,
-            float(self.has_privilege),
-        ], dtype=np.float32)
-        return np.concatenate([self.token_histogram, scalar])  # 28 + 17 = 45
+class IaCBundle:
+    """All generated IaC files for one task — held in memory only."""
+    task_id:             str
+    method:              str                   # "declarative" | "imperative" | "hybrid"
+    terraform_files:     Dict[str, str]        # filename → content
+    ansible_files:       Dict[str, str]        # filename → content
+    resource_list:       List[str]
+    constraints_applied: List[str]
+    generated_at:        float = field(default_factory=time.time)
 
 
-def extract_features(ir_payload: IRPayload) -> IRFeatureVector:
-    """Extract IRFeatureVector from IRPayload. Pure structural metrics."""
-    nodes = ir_payload.ir_nodes
-    if not nodes:
-        return IRFeatureVector(
-            token_histogram=np.zeros(_MAX_TOKEN, dtype=np.float32),
-            total_nodes=0, max_depth=0, avg_children=0.0,
-            mean_risk=0.0, max_risk=0.0, high_risk_ratio=0.0,
-            control_flow_ratio=0.0, io_ratio=0.0, network_ratio=0.0,
-            privilege_ratio=0.0, dependency_ratio=0.0,
-            has_dynamic=False, has_global_scope=False,
-            edge_count=0, avg_edge_weight=0.0, max_edge_weight=0.0,
-            has_privilege=False,
-        )
-
-    total = len(nodes)
-
-    histogram = np.zeros(_MAX_TOKEN, dtype=np.float32)
-    for node in nodes:
-        idx = _IR_TOKEN_MAP.get(node.ir_type, 0)
-        histogram[idx] += 1
-    histogram /= total
-
-    risks = np.array([n.risk_level for n in nodes], dtype=np.float32) / 10.0
-    mean_risk = float(np.mean(risks))
-    max_risk = float(np.max(risks))
-    high_risk_ratio = float(np.sum(risks >= 0.6) / total)
-
-    categories = [n.category for n in nodes]
-    cf = categories.count("control_flow") / total
-    io = categories.count("io") / total
-    net = categories.count("network") / total
-    priv = categories.count("privilege") / total
-    dep = categories.count("dependency") / total
-
-    ir_types = {n.ir_type for n in nodes}
-    has_dynamic = "DYNAMIC" in ir_types
-    has_global = "GLOBAL" in ir_types
-    has_priv = "PRIVILEGE" in ir_types
-
-    edges = ir_payload.dependency_edges
-    if edges:
-        weights = [e.weight for e in edges]
-        avg_w = float(np.mean(weights))
-        max_w = float(np.max(weights))
-    else:
-        avg_w = max_w = 0.0
-
-    avg_children = sum(len(n.children) for n in nodes) / total
-
-    return IRFeatureVector(
-        token_histogram=histogram,
-        total_nodes=total,
-        max_depth=ir_payload.max_depth,
-        avg_children=avg_children,
-        mean_risk=mean_risk,
-        max_risk=max_risk,
-        high_risk_ratio=high_risk_ratio,
-        control_flow_ratio=cf,
-        io_ratio=io,
-        network_ratio=net,
-        privilege_ratio=priv,
-        dependency_ratio=dep,
-        has_dynamic=has_dynamic,
-        has_global_scope=has_global,
-        edge_count=len(edges),
-        avg_edge_weight=avg_w,
-        max_edge_weight=max_w,
-        has_privilege=has_priv,
-    )
-
-
-def ir_payload_to_sequence(ir_payload: IRPayload) -> str:
+class IaCGeneratorAgent:
     """
-    Convert IRPayload to whitespace-separated structural token sequence.
-    This is the ONLY input format the ML model receives.
+    Generates Terraform + Ansible from policy constraints and strategy.
 
-    Example output: "MODULE IMPORT IMPORT FUNC_DEF CALL DYNAMIC NETWORK ASSIGN"
-    All tokens come from the fixed 28-item IR_VOCAB — no user-controlled text.
-    """
-    tokens = [node.ir_type for node in ir_payload.ir_nodes[:300]]
-    # Amplify high-signal tokens at sequence end
-    if ir_payload.dynamic_eval_count > 0:
-        tokens.extend(["DYNAMIC"] * min(ir_payload.dynamic_eval_count, 5))
-    if ir_payload.network_call_count > 0:
-        tokens.extend(["NETWORK"] * min(ir_payload.network_call_count, 3))
-    if ir_payload.privilege_sensitive_count > 0:
-        tokens.extend(["PRIVILEGE"] * min(ir_payload.privilege_sensitive_count, 3))
-    return " ".join(tokens[:512])
-
-
-# Layer 1: Rule-Based Scorer
-
-class RuleBasedScorer:
-    """
-    Deterministic rule engine. Fast, zero-dependency, always available.
-    Covers 14 explicit threat patterns across 5 risk dimensions.
+    Input:  PolicyDecision, StrategyDecision
+    Output: IaCBundle (in-memory, never written to disk by this agent)
     """
 
-    # (condition_key, flag_name, dimension_index, weight)
-    # dimensions: 0=structural 1=dep 2=priv 3=backdoor 4=exfil
-    RULES = [
-        ("has_dynamic",       "PATTERN_DYNAMIC_EVAL",         0, 0.55),
-        ("dynamic_eval_count","PATTERN_DYNAMIC_CODE",          0, 0.65),
-        ("has_global_scope",  "PATTERN_GLOBAL_SCOPE",          2, 0.45),
-        ("has_privilege",     "PATTERN_PRIVILEGE_CALLS",       2, 0.55),
-        ("high_risk_density", "PATTERN_HIGH_RISK_DENSITY",     0, 0.45),
-        ("complex_structure", "PATTERN_COMPLEX_STRUCTURE",     0, 0.25),
-        ("fragmented",        "PATTERN_FRAGMENTED_STRUCTURE",  0, 0.30),
-        ("high_dep",          "PATTERN_HIGH_DEPENDENCY",       1, 0.35),
-        ("many_imports",      "PATTERN_IMPORT_DENSITY",        1, 0.40),
-        ("network_dynamic",   "PATTERN_NETWORK_DYNAMIC",       3, 0.80),
-        ("network_eval",      "PATTERN_NETWORK_EVAL",          3, 0.60),
-        ("io_network",        "PATTERN_IO_NETWORK",            4, 0.65),
-        ("io_loop_network",   "PATTERN_IO_LOOP_NETWORK",       4, 0.75),
-        ("io_delete_loop",    "PATTERN_IO_DELETE_LOOP",        0, 0.85),
-    ]
+    def generate(self, policy_decision, strategy_decision) -> IaCBundle:
+        task_id     = policy_decision.task_id
+        constraints = [c.constraint_type for c in policy_decision.constraints]
+        method      = strategy_decision.method
+        resources   = strategy_decision.estimated_resources
 
-    def _conditions(self, fv: IRFeatureVector, ir: IRPayload) -> Dict[str, bool]:
-        ir_types = {n.ir_type for n in ir.ir_nodes}
-        return {
-            "has_dynamic":       fv.has_dynamic,
-            "dynamic_eval_count":ir.dynamic_eval_count > 0,
-            "has_global_scope":  fv.has_global_scope,
-            "has_privilege":     fv.has_privilege,
-            "high_risk_density": fv.high_risk_ratio > 0.25,
-            "complex_structure": fv.total_nodes > 400 and fv.max_depth > 25,
-            "fragmented":        fv.avg_children < 0.5 and fv.total_nodes > 80,
-            "high_dep":          fv.dependency_ratio > 0.28,
-            "many_imports":      sum(1 for n in ir.ir_nodes if n.ir_type == "IMPORT") > 8,
-            "network_dynamic":   fv.network_ratio > 0.03 and fv.has_dynamic,
-            "network_eval":      ir.network_call_count > 0 and ir.dynamic_eval_count > 0,
-            "io_network":        fv.io_ratio > 0.02 and fv.network_ratio > 0.02,
-            "io_loop_network":   (fv.io_ratio > 0.02 and fv.network_ratio > 0.02
-                                  and "LOOP" in ir_types),
-            "io_delete_loop":    ("IO" in ir_types and "DELETE" in ir_types
-                                  and "LOOP" in ir_types),
-        }
+        logger.info("Generating IaC: task=%s method=%s constraints=%s",
+                    task_id, method, constraints)
 
-    def score(self, fv: IRFeatureVector, ir_payload: IRPayload) -> MLRiskScore:
-        conds = self._conditions(fv, ir_payload)
-        flagged: List[str] = []
-        dims = [0.0, 0.0, 0.0, 0.0, 0.0]
-
-        for key, flag, dim, weight in self.RULES:
-            if conds.get(key, False):
-                flagged.append(flag)
-                dims[dim] = min(dims[dim] + weight, 1.0)
-
-        structural, dep, priv, backdoor, exfil = dims
-
-        if ir_payload.privilege_sensitive_count > 5:
-            priv = min(priv + 0.4, 1.0)
-            flagged.append("PATTERN_PRIVILEGE_ABUSE")
-
-        weights = [0.15, 0.15, 0.25, 0.25, 0.20]
-        weighted_avg = sum(s * w for s, w in zip(dims, weights))
-        overall = float(np.clip(0.55 * weighted_avg + 0.45 * max(dims), 0.0, 1.0))
-        confidence = min(0.72 + len(flagged) * 0.04, 0.92)
-
-        return MLRiskScore(
-            structural_anomaly_score=structural,
-            dependency_abuse_score=dep,
-            privilege_escalation_score=priv,
-            obfuscation_score=float(np.clip(structural * 0.8 + float(fv.has_dynamic) * 0.2, 0, 1)),
-            backdoor_pattern_score=float(np.clip(max(backdoor, exfil * 0.6), 0, 1)),
-            overall_risk=overall,
-            confidence=confidence,
-            flagged_patterns=list(set(flagged)),
-        )
-
-
-# Layer 2: HuggingFace Model (lazy-loaded)
-
-class HFSecurityAnalyzer:
-    """
-    Wraps the fine-tuned IRSecurityClassifier for inference.
-    Loads lazily. Falls back gracefully if unavailable.
-    Input: IR token sequences only — no raw code ever.
-    """
-
-    def __init__(
-        self,
-        checkpoint_dir: str = "/tmp/ir_security_model",
-        model_name: str = "microsoft/graphcodebert-base",
-        device: str = "auto",
-    ) -> None:
-        self.checkpoint_dir = checkpoint_dir
-        self.model_name = model_name
-        self.device = device
-        self._classifier = None
-        self._available = False
-        self._initialized = False
-
-    def _ensure_loaded(self) -> bool:
-        if self._initialized:
-            return self._available
-        try:
-            from src.analyzer.model_trainer import IRSecurityClassifier
-            self._classifier = IRSecurityClassifier(
-                model_name=self.model_name,
-                checkpoint_dir=self.checkpoint_dir,
-                device=self.device,
-            )
-            loaded_ft = self._classifier.load_pretrained()
-            self._available = True
-            self._initialized = True
-            status = "fine-tuned checkpoint" if loaded_ft else "base pretrained (not fine-tuned)"
-            logger.info("HF analyzer ready: %s [%s]", self.model_name, status)
-            return True
-        except Exception as e:
-            logger.warning("HF analyzer unavailable (%s) — rule-based only", type(e).__name__)
-            self._available = False
-            self._initialized = True
-            return False
-
-    def predict(
-        self, ir_payload: IRPayload, fv: IRFeatureVector
-    ) -> Optional[Dict[str, float]]:
-        if not self._ensure_loaded() or self._classifier is None:
-            return None
-        try:
-            seq = ir_payload_to_sequence(ir_payload)
-            vec = fv.to_vector().tolist()
-            return self._classifier.predict(seq, vec)
-        except Exception as e:
-            logger.debug("HF inference error: %s", e)
-            return None
-
-
-# Layer 3: Ensemble
-
-class EnsembleScorer:
-    """
-    Combines rule-based + HF model scores with adaptive weighting.
-
-    Weights:
-      HF available + confident + low disagreement → 40% rules / 60% HF
-      HF available + high disagreement            → 70% rules / 30% HF
-      HF unavailable                              → 100% rules
-    """
-
-    def score(
-        self,
-        rule_score: MLRiskScore,
-        hf_result: Optional[Dict[str, float]],
-        fv: IRFeatureVector,
-    ) -> MLRiskScore:
-        if hf_result is None:
-            return MLRiskScore(
-                **{k: getattr(rule_score, k) for k in rule_score.model_fields},
-                confidence=rule_score.confidence * 0.88,
+        if method == "none":
+            return IaCBundle(
+                task_id=task_id, method="none",
+                terraform_files={}, ansible_files={},
+                resource_list=[], constraints_applied=constraints,
             )
 
-        hf_risk = hf_result.get("risk_level", 0.0)
-        hf_safe = hf_result.get("safe", 0.0)
-        hf_risk_adj = hf_risk * (1.0 - hf_safe * 0.4)
+        tf_files:  Dict[str, str] = {}
+        ans_files: Dict[str, str] = {}
 
-        disagreement = abs(rule_score.overall_risk - hf_risk_adj)
-        high_disagree = disagreement > 0.35
-        hf_confident = hf_safe < 0.3 or hf_risk > 0.6
+        # ── Core infrastructure (always generated) ───────────────────────
+        tf_files["main.tf"]      = self._tf_main(task_id, constraints, resources)
+        tf_files["variables.tf"] = self._tf_variables(constraints)
+        tf_files["outputs.tf"]   = self._tf_outputs()
+        tf_files["nsg.tf"]       = self._tf_nsg(constraints)
 
-        if hf_confident and not high_disagree:
-            wr, wh = 0.40, 0.60
-        elif high_disagree:
-            wr, wh = 0.70, 0.30
-        else:
-            wr, wh = 0.55, 0.45
+        # ── Declarative / hybrid: Ansible hardening ──────────────────────
+        if method in ("declarative", "hybrid"):
+            ans_files["site.yml"]                        = self._ansible_site(task_id, constraints)
+            ans_files["roles/hardening/tasks/main.yml"]  = self._ansible_hardening(constraints)
+            ans_files["roles/hardening/handlers/main.yml"] = self._ansible_handlers()
 
-        def blend(rv: float, key: str) -> float:
-            return float(np.clip(wr * rv + wh * hf_result.get(key, rv), 0.0, 1.0))
+        # ── Imperative: bash script ──────────────────────────────────────
+        if method == "imperative":
+            tf_files["deploy.sh"] = self._imperative_script(task_id, constraints)
 
-        structural = blend(rule_score.structural_anomaly_score, "structural_anomaly")
-        dep = blend(rule_score.dependency_abuse_score, "dependency_abuse")
-        priv = blend(rule_score.privilege_escalation_score, "privilege_escalation")
-        backdoor = blend(rule_score.backdoor_pattern_score, "backdoor")
-        backdoor = float(np.clip(backdoor + hf_result.get("data_exfiltration", 0.0) * 0.3, 0, 1))
-        obf = blend(rule_score.obfuscation_score, "structural_anomaly")
-        overall = float(np.clip(wr * rule_score.overall_risk + wh * hf_risk_adj, 0.0, 1.0))
+        # ── Conditional resources ────────────────────────────────────────
+        if "sandboxed_execution" in constraints:
+            tf_files["container.tf"] = self._tf_container(task_id)
 
-        if high_disagree:
-            confidence = rule_score.confidence * 0.70
-        elif hf_confident:
-            confidence = min(rule_score.confidence * 1.12, 0.96)
-        else:
-            confidence = rule_score.confidence * 0.90
+        if "monitoring_required" in constraints:
+            tf_files["monitoring.tf"] = self._tf_monitoring(task_id)
 
-        flagged = list(rule_score.flagged_patterns)
-        if hf_result.get("backdoor", 0.0) > 0.70:
-            flagged.append("ML_BACKDOOR_SIGNAL")
-        if hf_result.get("privilege_escalation", 0.0) > 0.70:
-            flagged.append("ML_PRIVESC_SIGNAL")
-        if hf_result.get("data_exfiltration", 0.0) > 0.70:
-            flagged.append("ML_EXFIL_SIGNAL")
-        if hf_result.get("structural_anomaly", 0.0) > 0.70:
-            flagged.append("ML_STRUCTURAL_ANOMALY")
-        if high_disagree:
-            flagged.append("RULE_ML_DISAGREEMENT")
+        if "network_isolation" in constraints:
+            tf_files["private_endpoint.tf"] = self._tf_private_endpoint(task_id)
 
-        return MLRiskScore(
-            structural_anomaly_score=structural,
-            dependency_abuse_score=dep,
-            privilege_escalation_score=priv,
-            obfuscation_score=obf,
-            backdoor_pattern_score=backdoor,
-            overall_risk=overall,
-            confidence=float(np.clip(confidence, 0.0, 1.0)),
-            flagged_patterns=list(set(flagged)),
-        )
+        if "privilege_restriction" in constraints:
+            tf_files["rbac.tf"] = self._tf_rbac()
 
-
-# Public Interface
-
-class MLSecurityAnalyzer:
-    """
-    Public analyzer. Orchestrates all three scoring layers.
-
-    To train:
-        python -m src.analyzer.model_trainer --samples 5000
-        Checkpoint → /tmp/ir_security_model/
-
-    After training, MLSecurityAnalyzer auto-loads checkpoint on next init.
-    Falls back to rule-based if checkpoint not present.
-    """
-
-    def __init__(
-        self,
-        checkpoint_dir: str = "/tmp/ir_security_model",
-        model_name: str = "microsoft/graphcodebert-base",
-        device: str = "auto",
-    ) -> None:
-        self._rule_scorer = RuleBasedScorer()
-        self._hf = HFSecurityAnalyzer(
-            checkpoint_dir=checkpoint_dir,
-            model_name=model_name,
-            device=device,
-        )
-        self._ensemble = EnsembleScorer()
-        self._times: List[float] = []
-
-    def analyze(self, ir_payload: IRPayload) -> MLRiskScore:
-        t0 = time.perf_counter()
-        fv = extract_features(ir_payload)
-        rule_score = self._rule_scorer.score(fv, ir_payload)
-        hf_result = self._hf.predict(ir_payload, fv)
-        score = self._ensemble.score(rule_score, hf_result, fv)
-        self._times.append(time.perf_counter() - t0)
-        return score
-
-    def analyze_batch(
-        self, ir_payloads: List[IRPayload], task_id: str
-    ) -> RiskAssessment:
-        header = create_header(
-            MessageType.RISK_ASSESSMENT,
-            AgentRole.ML_ANALYZER,
-            AgentRole.POLICY_ENGINE,
-            task_id,
-        )
-        if not ir_payloads:
-            return RiskAssessment(
-                header=header, task_id=task_id, file_scores=[],
-                aggregate_risk=0.0, high_risk_file_count=0, total_files=0,
-                circular_dependency_count=0, external_dependency_count=0,
-                privileged_api_count=0, total_ir_nodes=0, anomalous_pattern_count=0,
-            )
-
-        file_scores = [self.analyze(ir) for ir in ir_payloads]
-        risks = [s.overall_risk for s in file_scores]
-        aggregate_risk = float(np.percentile(risks, 90))
-        high_risk_count = sum(1 for r in risks if r > 0.70)
-
-        all_patterns: set = set()
-        for s in file_scores:
-            all_patterns.update(s.flagged_patterns)
-
-        return RiskAssessment(
-            header=header,
+        return IaCBundle(
             task_id=task_id,
-            file_scores=file_scores,
-            aggregate_risk=aggregate_risk,
-            high_risk_file_count=high_risk_count,
-            total_files=len(ir_payloads),
-            circular_dependency_count=0,
-            external_dependency_count=sum(
-                1 for ir in ir_payloads
-                if any(n.ir_type == "IMPORT" for n in ir.ir_nodes)
-            ),
-            privileged_api_count=sum(ir.privilege_sensitive_count for ir in ir_payloads),
-            total_ir_nodes=sum(ir.total_nodes for ir in ir_payloads),
-            anomalous_pattern_count=len(all_patterns),
+            method=method,
+            terraform_files=tf_files,
+            ansible_files=ans_files,
+            resource_list=resources,
+            constraints_applied=constraints,
         )
 
-    def perf_stats(self) -> Dict:
-        if not self._times:
-            return {}
-        ms = [t * 1000 for t in self._times]
-        return {
-            "n": len(ms),
-            "mean_ms": float(np.mean(ms)),
-            "p95_ms": float(np.percentile(ms, 95)),
-        }
+    # ── Terraform: main infrastructure ──────────────────────────────────────
 
+    def _tf_main(self, task_id: str, constraints: List[str], resources: List[str]) -> str:
+        isolation = "true" if "network_isolation"   in constraints else "false"
+        sandbox   = "true" if "sandboxed_execution" in constraints else "false"
+        return f'''# Generated by IaC Generator Agent
+# Task: {task_id}
+# DO NOT EDIT — auto-generated, ephemeral
 
-_analyzer: Optional[MLSecurityAnalyzer] = None
+terraform {{
+  required_providers {{
+    azurerm = {{
+      source  = "hashicorp/azurerm"
+      version = "~> 3.0"
+    }}
+  }}
+  backend "azurerm" {{
+    resource_group_name  = var.state_resource_group
+    storage_account_name = var.state_storage_account
+    container_name       = "tfstate"
+    key                  = "{task_id}.tfstate"
+  }}
+}}
 
+provider "azurerm" {{
+  features {{}}
+  # When using service-principal auth, set AZURE_* env vars.
+  # When using az login, these are optional.
+  subscription_id = var.subscription_id
+}}
 
-def get_analyzer(**kwargs) -> MLSecurityAnalyzer:
-    global _analyzer
-    if _analyzer is None:
-        _analyzer = MLSecurityAnalyzer(**kwargs)
-    return _analyzer
+resource "azurerm_resource_group" "main" {{
+  name     = "rg-${{var.app_name}}-${{var.environment}}"
+  location = var.location
+  tags = {{
+    task_id    = "{task_id}"
+    managed_by = "secure-analysis-platform"
+    isolated   = "{isolation}"
+    sandboxed  = "{sandbox}"
+  }}
+}}
+
+resource "azurerm_virtual_network" "main" {{
+  name                = "vnet-${{var.app_name}}"
+  resource_group_name = azurerm_resource_group.main.name
+  location            = azurerm_resource_group.main.location
+  address_space       = ["10.0.0.0/16"]
+}}
+
+resource "azurerm_subnet" "app" {{
+  name                 = "snet-app"
+  resource_group_name  = azurerm_resource_group.main.name
+  virtual_network_name = azurerm_virtual_network.main.name
+  address_prefixes     = ["10.0.1.0/24"]
+}}
+
+resource "azurerm_subnet_network_security_group_association" "app" {{
+  subnet_id                 = azurerm_subnet.app.id
+  network_security_group_id = azurerm_network_security_group.app.id
+}}
+'''
+
+    # ── Terraform: NSG ───────────────────────────────────────────────────────
+    #
+    # Priority allocation (must be unique per NSG):
+    #   100  — AllowHTTPS inbound
+    #   200  — AllowInternalMTLS inbound
+    #   300  — AllowHTTPS outbound (to Azure services)
+    #   4094 — DenyAllInbound  (catch-all)
+    #   4095 — DenyAllOutbound (catch-all)
+    #
+    def _tf_nsg(self, constraints: List[str]) -> str:
+        deny = "network_isolation" in constraints
+        default_action = "Deny" if deny else "Allow"
+        return f'''# NSG — Network Security Group
+# network_isolation={deny}
+# Note: all priorities are unique (Azure requirement).
+
+resource "azurerm_network_security_group" "app" {{
+  name                = "nsg-app"
+  location            = azurerm_resource_group.main.location
+  resource_group_name = azurerm_resource_group.main.name
+
+  # ── Inbound ─────────────────────────────────────────────────────────
+  security_rule {{
+    name                       = "AllowHTTPS"
+    priority                   = 100
+    direction                  = "Inbound"
+    access                     = "Allow"
+    protocol                   = "Tcp"
+    source_port_range          = "*"
+    destination_port_range     = "443"
+    source_address_prefix      = var.allowed_cidr
+    destination_address_prefix = "*"
+  }}
+
+  security_rule {{
+    name                       = "AllowInternalMTLS"
+    priority                   = 200
+    direction                  = "Inbound"
+    access                     = "Allow"
+    protocol                   = "Tcp"
+    source_port_range          = "*"
+    destination_port_range     = "8443"
+    source_address_prefix      = "10.0.0.0/16"
+    destination_address_prefix = "*"
+  }}
+
+  security_rule {{
+    name                       = "DenyAllInbound"
+    priority                   = 4094
+    direction                  = "Inbound"
+    access                     = "{default_action}"
+    protocol                   = "*"
+    source_port_range          = "*"
+    destination_port_range     = "*"
+    source_address_prefix      = "*"
+    destination_address_prefix = "*"
+  }}
+
+  # ── Outbound ────────────────────────────────────────────────────────
+  security_rule {{
+    name                       = "AllowHTTPSOutbound"
+    priority                   = 300
+    direction                  = "Outbound"
+    access                     = "Allow"
+    protocol                   = "Tcp"
+    source_port_range          = "*"
+    destination_port_range     = "443"
+    source_address_prefix      = "*"
+    destination_address_prefix = "AzureCloud"
+  }}
+
+  security_rule {{
+    name                       = "DenyAllOutbound"
+    priority                   = 4095
+    direction                  = "Outbound"
+    access                     = "{default_action}"
+    protocol                   = "*"
+    source_port_range          = "*"
+    destination_port_range     = "*"
+    source_address_prefix      = "*"
+    destination_address_prefix = "*"
+  }}
+}}
+'''
+
+    # ── Terraform: variables ─────────────────────────────────────────────────
+    # client_secret intentionally absent — sourced from Key Vault at runtime.
+
+    def _tf_variables(self, constraints: List[str]) -> str:
+        monitoring_var = ""
+        if "monitoring_required" in constraints:
+            monitoring_var = '''
+variable "action_group_id" {
+  description = "Azure Monitor action group resource ID for alerts."
+}'''
+        return f'''variable "subscription_id" {{
+  description = "Azure subscription ID. Leave empty to use az login default."
+  default     = ""
+}}
+variable "location"              {{ default = "eastus" }}
+variable "app_name"              {{}}
+variable "environment"           {{ default = "prod" }}
+variable "app_image"             {{ description = "Container image URI." }}
+variable "allowed_cidr"          {{ default = "10.0.0.0/8" }}
+variable "state_resource_group"  {{}}
+variable "state_storage_account" {{}}
+variable "key_vault_id"          {{ description = "Key Vault resource ID for secret retrieval." }}{monitoring_var}
+'''
+
+    # ── Terraform: outputs ───────────────────────────────────────────────────
+
+    def _tf_outputs(self) -> str:
+        return '''output "resource_group_name" {
+  value = azurerm_resource_group.main.name
+}
+output "vnet_id" {
+  value = azurerm_virtual_network.main.id
+}
+output "subnet_id" {
+  value = azurerm_subnet.app.id
+}
+'''
+
+    # ── Terraform: sandboxed container ──────────────────────────────────────
+
+    def _tf_container(self, task_id: str) -> str:
+        return f'''# Sandboxed ACI container — task {task_id}
+# Requires subnet association to be applied first.
+
+resource "azurerm_container_group" "app" {{
+  name                = "aci-app"
+  location            = azurerm_resource_group.main.location
+  resource_group_name = azurerm_resource_group.main.name
+  os_type             = "Linux"
+  restart_policy      = "Never"
+  ip_address_type     = "Private"
+  subnet_ids          = [azurerm_subnet.app.id]
+
+  # Ensure NSG is associated before container is created
+  depends_on = [azurerm_subnet_network_security_group_association.app]
+
+  container {{
+    name   = "app"
+    image  = var.app_image
+    cpu    = "0.5"
+    memory = "1.5"
+
+    # Hardened security context
+    security_context {{
+      allow_privilege_escalation = false
+      read_only_root_filesystem  = true
+      run_as_non_root            = true
+      run_as_user                = 1000
+    }}
+
+    # Liveness probe — container is replaced if it stops responding
+    liveness_probe {{
+      http_get {{
+        path   = "/healthz"
+        port   = 8080
+        scheme = "Http"
+      }}
+      initial_delay_seconds = 15
+      period_seconds        = 20
+    }}
+
+    # Secrets sourced from Key Vault — never passed as plain env vars
+    environment_variables = {{
+      APP_ENV       = var.environment
+      TASK_ID       = "{task_id}"
+    }}
+  }}
+}}
+'''
+
+    # ── Terraform: monitoring ────────────────────────────────────────────────
+
+    def _tf_monitoring(self, task_id: str) -> str:
+        return f'''# Monitoring — task {task_id}
+
+resource "azurerm_log_analytics_workspace" "main" {{
+  name                = "law-app"
+  location            = azurerm_resource_group.main.location
+  resource_group_name = azurerm_resource_group.main.name
+  sku                 = "PerGB2018"
+  retention_in_days   = 30
+}}
+
+resource "azurerm_monitor_activity_log_alert" "security" {{
+  name                = "alert-security-{task_id[:8]}"
+  resource_group_name = azurerm_resource_group.main.name
+  scopes              = [azurerm_resource_group.main.id]
+
+  criteria {{
+    category = "Security"
+    level    = "Warning"
+  }}
+
+  # action_group_id is declared in variables.tf (monitoring_required path)
+  action {{
+    action_group_id = var.action_group_id
+  }}
+
+  tags = {{
+    task_id = "{task_id}"
+  }}
+}}
+'''
+
+    # ── Terraform: private endpoint (network_isolation) ──────────────────────
+
+    def _tf_private_endpoint(self, task_id: str) -> str:
+        return f'''# Private endpoint — network_isolation constraint
+# Routes Key Vault traffic over the private VNet, no public internet.
+
+resource "azurerm_subnet" "private_endpoint" {{
+  name                                          = "snet-pe"
+  resource_group_name                           = azurerm_resource_group.main.name
+  virtual_network_name                          = azurerm_virtual_network.main.name
+  address_prefixes                              = ["10.0.2.0/24"]
+  private_endpoint_network_policies_enabled     = false
+}}
+
+resource "azurerm_private_endpoint" "key_vault" {{
+  name                = "pe-kv-{task_id[:8]}"
+  location            = azurerm_resource_group.main.location
+  resource_group_name = azurerm_resource_group.main.name
+  subnet_id           = azurerm_subnet.private_endpoint.id
+
+  private_service_connection {{
+    name                           = "psc-kv"
+    private_connection_resource_id = var.key_vault_id
+    subresource_names              = ["vault"]
+    is_manual_connection           = false
+  }}
+}}
+'''
+
+    # ── Terraform: RBAC (privilege_restriction) ──────────────────────────────
+
+    def _tf_rbac(self) -> str:
+        return '''# RBAC — privilege_restriction constraint
+# Container identity gets Reader role only on the resource group.
+
+data "azurerm_client_config" "current" {}
+
+resource "azurerm_user_assigned_identity" "app" {
+  name                = "id-app"
+  location            = azurerm_resource_group.main.location
+  resource_group_name = azurerm_resource_group.main.name
+}
+
+resource "azurerm_role_assignment" "app_reader" {
+  scope                = azurerm_resource_group.main.id
+  role_definition_name = "Reader"
+  principal_id         = azurerm_user_assigned_identity.app.principal_id
+}
+'''
+
+    # ── Ansible: site playbook ───────────────────────────────────────────────
+
+    def _ansible_site(self, task_id: str, constraints: List[str]) -> str:
+        roles = ["common", "hardening"]
+        if "monitoring_required" in constraints:
+            roles.append("monitoring")
+        roles_yaml = "\n    - ".join(roles)
+        return f'''---
+# Ansible site playbook — task {task_id}
+# Generated by IaC Generator Agent
+
+- name: Deploy and harden application servers
+  hosts: app_servers
+  become: yes
+  roles:
+    - {roles_yaml}
+'''
+
+    # ── Ansible: hardening tasks ─────────────────────────────────────────────
+
+    def _ansible_hardening(self, constraints: List[str]) -> str:
+        tasks = ['''---
+# Hardening tasks — generated by IaC Generator Agent
+
+- name: Disable root SSH login
+  lineinfile:
+    path: /etc/ssh/sshd_config
+    regexp: "^PermitRootLogin"
+    line: "PermitRootLogin no"
+    validate: "/usr/sbin/sshd -t -f %s"
+  notify: restart sshd
+
+- name: Disable password authentication over SSH
+  lineinfile:
+    path: /etc/ssh/sshd_config
+    regexp: "^PasswordAuthentication"
+    line: "PasswordAuthentication no"
+  notify: restart sshd
+
+- name: Set secure umask
+  lineinfile:
+    path: /etc/profile
+    regexp: "^umask"
+    line: "umask 027"
+
+- name: Enable UFW firewall with default deny
+  ufw:
+    state: enabled
+    policy: deny
+    logging: "on"''']
+
+        if "network_isolation" in constraints:
+            tasks.append('''
+- name: Block all outbound traffic except approved ports
+  ufw:
+    rule: deny
+    direction: out
+    to: any
+
+- name: Allow outbound HTTPS to Azure endpoints only
+  ufw:
+    rule: allow
+    direction: out
+    proto: tcp
+    to_port: "443"
+    to_ip: "AzureCloud"''')
+
+        if "privilege_restriction" in constraints:
+            tasks.append('''
+- name: Remove SUID bit from dangerous binaries
+  file:
+    path: "{{ item }}"
+    mode: "u-s"
+  loop:
+    - /usr/bin/su
+    - /usr/bin/sudo
+    - /usr/bin/newgrp
+    - /usr/bin/chsh
+
+- name: Disable core dumps
+  lineinfile:
+    path: /etc/security/limits.conf
+    line: "* hard core 0"''')
+
+        if "monitoring_required" in constraints:
+            tasks.append('''
+- name: Ensure auditd is installed and running
+  package:
+    name: auditd
+    state: present
+
+- name: Enable auditd service
+  service:
+    name: auditd
+    state: started
+    enabled: yes''')
+
+        return "\n".join(tasks)
+
+    # ── Ansible: handlers ────────────────────────────────────────────────────
+
+    def _ansible_handlers(self) -> str:
+        return '''---
+            # Handlers — triggered by notify in hardening tasks
+
+            - name: restart sshd
+            service:
+                name: sshd
+                state: restarted
+
+            - name: reload ufw
+            command: ufw reload
+            '''
+
+    # ── Imperative: bash script ──────────────────────────────────────────────
+
+    def _imperative_script(self, task_id: str, constraints: List[str]) -> str:
+        outbound_deny = ""
+        if "network_isolation" in constraints:
+            outbound_deny = '''
+            # Deny all outbound (network_isolation constraint)
+            az network nsg rule create --resource-group "$RG" --nsg-name nsg-app \\
+            --name DenyAllOutbound --priority 4095 --direction Outbound --access Deny \\
+            --protocol "*" --source-address-prefixes "*" --destination-address-prefixes "*"
+            '''
+            return f'''#!/bin/bash
+            # Imperative deployment script — task {task_id}
+            # Generated by IaC Generator Agent
+            set -euo pipefail
+
+            RG="rg-app-prod"
+            LOCATION="eastus"
+
+            echo "[1/6] Creating resource group..."
+            az group create --name "$RG" --location "$LOCATION" \\
+            --tags task_id={task_id} managed_by=secure-analysis-platform
+
+            echo "[2/6] Creating VNet..."
+            az network vnet create \\
+            --resource-group "$RG" --name vnet-app \\
+            --address-prefix 10.0.0.0/16
+
+            echo "[3/6] Creating NSG with deny-all rules..."
+            az network nsg create --resource-group "$RG" --name nsg-app
+
+            # Allow HTTPS inbound (priority 100)
+            az network nsg rule create --resource-group "$RG" --nsg-name nsg-app \\
+            --name AllowHTTPS --priority 100 --direction Inbound --access Allow \\
+            --protocol Tcp --destination-port-ranges 443
+
+            # Allow internal mTLS (priority 200)
+            az network nsg rule create --resource-group "$RG" --nsg-name nsg-app \\
+            --name AllowMTLS --priority 200 --direction Inbound --access Allow \\
+            --protocol Tcp --destination-port-ranges 8443 \\
+            --source-address-prefixes 10.0.0.0/16
+
+            # Deny all inbound catch-all (priority 4094)
+            az network nsg rule create --resource-group "$RG" --nsg-name nsg-app \\
+            --name DenyAllInbound --priority 4094 --direction Inbound --access Deny \\
+            --protocol "*" --source-address-prefixes "*" --destination-address-prefixes "*"
+
+            # Allow outbound HTTPS to Azure (priority 300)
+            az network nsg rule create --resource-group "$RG" --nsg-name nsg-app \\
+            --name AllowHTTPSOutbound --priority 300 --direction Outbound --access Allow \\
+            --protocol Tcp --destination-port-ranges 443 \\
+            --destination-address-prefixes AzureCloud
+            {outbound_deny}
+            echo "[4/6] Creating subnet with NSG..."
+            az network vnet subnet create \\
+            --resource-group "$RG" --vnet-name vnet-app \\
+            --name snet-app --address-prefix 10.0.1.0/24 \\
+            --network-security-group nsg-app
+
+            echo "[5/6] Deploying sandboxed container..."
+            az container create \\
+            --resource-group "$RG" --name aci-app \\
+            --image "${{APP_IMAGE}}" \\
+            --cpu 0.5 --memory 1.5 \\
+            --subnet snet-app --vnet vnet-app \\
+            --restart-policy Never \\
+            --environment-variables APP_ENV=prod TASK_ID={task_id}
+
+            echo "[6/6] Deployment complete."
+        '''
