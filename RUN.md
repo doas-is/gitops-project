@@ -34,7 +34,20 @@ az ad sp create-for-rbac --name my-app --role Contributor --scopes /subscription
 - password → AZURE_CLIENT_SECRET
 - tenant → AZURE_TENANT_ID
 
+# Register Ressources.Network 
 
+New or fresh Azure subscriptions don't auto-register all resource providers. The first time you try to use a namespace (like Microsoft.Network), it needs to be explicitly registered : 
+
+```bash
+az provider register --namespace Microsoft.Network --subscription <YOUR_SUBSCRIPTION_ID>
+
+
+# Then wait for it to complete (can take 1–2 minutes)
+
+az provider show --namespace Microsoft.Network --query "registrationState"
+
+# Wait until it returns "Registered".
+```
 
 Minimum required for **local/demo mode** (no Azure):
 
