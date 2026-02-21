@@ -76,7 +76,7 @@ class KeyVaultKMS:
     """
     Azure Key Vault backed Key Management.
 
-    Credential selection now respects az login correctly:
+    FIX: Credential selection now respects az login correctly:
       1. AZURE_USE_MANAGED_IDENTITY=true  → ManagedIdentityCredential
       2. All three SP vars present         → ClientSecretCredential
       3. Otherwise                         → AzureCliCredential  (az login)

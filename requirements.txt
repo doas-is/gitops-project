@@ -39,3 +39,6 @@ rich
 cffi
 
 azure-keyvault-keys
+azure-mgmt-containerinstance
+azure-mgmt-network
+azure-mgmt-resource

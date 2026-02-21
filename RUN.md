@@ -28,6 +28,14 @@ cp .env.example .env
 az ad sp create-for-rbac --name my-app --role Contributor --scopes /subscriptions/<SUBSCRIPTION_ID>
 ```
 
+**Mapping:**
+
+- appId → AZURE_CLIENT_ID
+- password → AZURE_CLIENT_SECRET
+- tenant → AZURE_TENANT_ID
+
+
+
 Minimum required for **local/demo mode** (no Azure):
 
 ```env

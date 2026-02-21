@@ -43,8 +43,11 @@ _stats = {"total_tasks": 0, "approved": 0, "rejected": 0,
 # Store IaC bundles keyed by task_id for download
 _iac_store: Dict[str, Dict] = {}
 
-# Pending HITL requests keyed by request_id
+# Pending HITL requests/alerts keyed by alert_id
 _pending_hitl: Dict[str, Dict] = {}
+
+# Intelligence summaries keyed by task_id
+_intelligence_store: Dict[str, Dict] = {}
 
 
 async def _broadcast(event: Dict) -> None:
@@ -77,11 +80,41 @@ def add_event(event_type: str, data: Dict, severity: str = "info") -> None:
                 "generated_at": time.time(),
             }
 
-    # Cache HITL requests
+    # Cache intelligence summaries
+    if event_type == "intelligence_ready":
+        task_id = data.get("task_id")
+        if task_id:
+            _intelligence_store[task_id] = data.get("summary", {})
+
+    # Cache HITL alerts (new format from real pipeline)
+    if event_type == "hitl_alert":
+        alert_id = data.get("alert_id")
+        if alert_id:
+            _pending_hitl[alert_id] = {**data, "status": "pending"}
+
+    # Cache HITL requests (old format — backward compat)
     if event_type == "hitl_required":
         req_id = data.get("hitl_request_id")
         if req_id:
             _pending_hitl[req_id] = {**data, "status": "pending"}
+
+    # Track VM events per task
+    if event_type == "vm_created":
+        task_id = data.get("task_id")
+        if task_id and task_id in _active_tasks:
+            vms = _active_tasks[task_id].setdefault("vms", {})
+            vms[data.get("vm_id", "")] = {
+                "role": data.get("role"), "ip": data.get("private_ip"),
+                "name": data.get("azure_name"), "status": "running",
+                "created_at": time.time(),
+            }
+    if event_type == "vm_terminated":
+        task_id = data.get("task_id")
+        if task_id and task_id in _active_tasks:
+            vms = _active_tasks[task_id].get("vms", {})
+            vm_id = data.get("vm_id", "")
+            if vm_id in vms:
+                vms[vm_id]["status"] = data.get("reason", "terminated")
 
     try:
         loop = asyncio.get_event_loop()
@@ -228,66 +261,101 @@ async def download_iac_file(task_id: str, path: str) -> StreamingResponse:
 
 @app.get("/api/hitl")
 async def list_hitl() -> List[Dict]:
-    """List pending HITL requests."""
+    """List all HITL alerts (malicious files + policy confidence)."""
     return list(_pending_hitl.values())
 
 
-@app.post("/api/hitl/{request_id}")
-async def submit_hitl(request_id: str, body: Dict[str, Any]) -> Dict:
-    """Submit a HITL decision (APPROVE or REJECT)."""
-    if request_id not in _pending_hitl:
+@app.get("/api/intelligence/{task_id}")
+async def get_intelligence(task_id: str) -> Dict:
+    """Get intelligence summary for a task."""
+    intel = _intelligence_store.get(task_id)
+    if not intel:
         from fastapi import HTTPException
-        raise HTTPException(status_code=404, detail="HITL request not found")
+        raise HTTPException(status_code=404, detail="Intelligence summary not ready")
+    return intel
 
-    decision = body.get("decision", "").upper()
-    if decision not in ("APPROVE", "REJECT"):
-        return {"error": "decision must be APPROVE or REJECT"}
 
-    operator_id = body.get("operator_id", "human-operator")
-    notes = body.get("notes", "")
-
-    _pending_hitl[request_id]["status"] = "resolved"
-    _pending_hitl[request_id]["decision"] = decision
-    _pending_hitl[request_id]["operator_id"] = operator_id
-    _pending_hitl[request_id]["resolved_at"] = time.time()
-
-    # Broadcast HITL response event
-    task_id = _pending_hitl[request_id].get("task_id", "")
-    add_event("hitl_resolved", {
-        "task_id": task_id,
-        "hitl_request_id": request_id,
-        "decision": decision,
-        "operator_id": operator_id,
-        "notes": notes,
-        "message": f"✅ HITL resolved: {decision} by {operator_id}",
-    }, severity="info" if decision == "APPROVE" else "warning")
-
-    # Forward to policy engine if running
+@app.get("/api/vms")
+async def get_active_vms() -> List[Dict]:
+    """Get all active VMs across all tasks."""
     try:
         from src.main import get_pipeline
-        from src.schemas.a2a_schemas import (
-            AgentRole, HITLResponse, MessageType, create_header,
-        )
-        import secrets
-        pipeline = get_pipeline()
-        header = create_header(
-            MessageType.HITL_RESPONSE,
-            AgentRole.HITL_ESCALATION,
-            AgentRole.POLICY_ENGINE,
-            task_id,
-        )
-        response = HITLResponse(
-            header=header,
-            request_id=request_id,
-            decision=decision,
-            operator_id=operator_id,
-            notes=notes,
-        )
-        await pipeline.policy_engine._hitl_responses.put(response)
-    except Exception as e:
-        logger.warning("Could not forward HITL response to pipeline: %s", e)
+        return get_pipeline()._orchestrator.list_active_vms()
+    except Exception:
+        return []
 
-    return {"status": "ok", "decision": decision, "request_id": request_id}
+
+@app.post("/api/hitl/{alert_id}")
+async def submit_hitl(alert_id: str, body: Dict[str, Any]) -> Dict:
+    """
+    Submit a HITL decision for a security alert or policy escalation.
+    decision: APPROVE | REJECT | QUARANTINE
+    """
+    if alert_id not in _pending_hitl:
+        from fastapi import HTTPException
+        raise HTTPException(status_code=404, detail="Alert not found")
+
+    decision    = body.get("decision", "").upper()
+    operator_id = body.get("operator_id", "human-operator")
+    notes       = body.get("notes", "")
+
+    if decision not in ("APPROVE", "REJECT", "QUARANTINE"):
+        return {"error": "decision must be APPROVE, REJECT, or QUARANTINE"}
+
+    alert = _pending_hitl[alert_id]
+    alert["status"]      = "resolved"
+    alert["decision"]    = decision
+    alert["operator_id"] = operator_id
+    alert["notes"]       = notes
+    alert["resolved_at"] = time.time()
+
+    task_id = alert.get("task_id", "")
+    add_event("hitl_resolved", {
+        "task_id":    task_id,
+        "alert_id":   alert_id,
+        "type":       alert.get("type", "unknown"),
+        "decision":   decision,
+        "operator_id": operator_id,
+        "notes":      notes,
+        "message": (
+            f"✅ HITL resolved: {decision} by {operator_id}"
+            + (f" — {notes}" if notes else "")
+        ),
+    }, severity="info" if decision == "APPROVE" else "warning")
+
+    # Also forward to pipeline policy engine if it's a policy escalation
+    if alert.get("type") == "policy_confidence":
+        try:
+            from src.main import get_pipeline
+            from src.schemas.a2a_schemas import (
+                AgentRole, HITLResponse, MessageType, create_header,
+            )
+            pipeline = get_pipeline()
+            header = create_header(
+                MessageType.HITL_RESPONSE,
+                AgentRole.HITL_ESCALATION,
+                AgentRole.POLICY_ENGINE,
+                task_id,
+            )
+            response = HITLResponse(
+                header=header,
+                request_id=alert_id,
+                decision=decision,
+                operator_id=operator_id,
+                notes=notes,
+            )
+            await pipeline.policy_engine._hitl_responses.put(response)
+        except Exception as e:
+            logger.warning("Could not forward HITL to policy engine: %s", e)
+
+    # Notify pipeline of malicious file resolution
+    try:
+        from src.main import resolve_hitl_alert
+        resolve_hitl_alert(alert_id, decision, operator_id, notes)
+    except Exception:
+        pass
+
+    return {"status": "ok", "decision": decision, "alert_id": alert_id}
 
 
 async def _run_task(task_id: str, repo_url: str) -> None:
