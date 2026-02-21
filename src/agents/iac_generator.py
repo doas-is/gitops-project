@@ -1,4 +1,5 @@
 """
+<<<<<<< HEAD
 Receives: PolicyDecision + StrategyDecision (+ optional error_feedback on retry)
 Produces: IaCBundle — Terraform (.tf) + Ansible (.yml) as in-memory strings
 
@@ -10,6 +11,21 @@ Security contract
   • NSG priorities are unique and validated before generation
 
 What it does with the inputs
+=======
+IaC Generator Agent  —  src/agents/iac_generator.py
+
+Receives: PolicyDecision + StrategyDecision (+ optional error_feedback on retry)
+Produces: IaCBundle — Terraform (.tf) + Ansible (.yml) as in-memory strings
+
+Security contract
+─────────────────
+  • Never sees raw code, AST, or IR — only constraint names + strategy metadata
+  • All generated files are held in memory; the Deployment Agent applies them
+  • client_secret is NEVER a Terraform variable — read from Key Vault at runtime
+  • NSG priorities are unique and validated before generation
+
+Changes vs. prior version
+>>>>>>> 3820c0077c02f7f7f31a2770906854e88f81f1a0
 ──────────────────────────
   • generate() now accepts error_feedback: str parameter — fed from
     FeasibilityValidatorAgent.retry_hint on retry attempts. When the LLM
@@ -19,6 +35,7 @@ What it does with the inputs
   • IaCBundle now carries: attempt (int), error_feedback (str)
     so the audit log and the UI can show retry context.
 
+<<<<<<< HEAD
   • Duplicate NSG priority 4096 on DenyAllInbound + DenyAllOutbound
     → unique priorities 4094 (Inbound) and 4095 (Outbound)
 
@@ -53,6 +70,42 @@ What it does with the inputs
     → Key Vault access policy granting the app identity get/list on secrets
 
   • Error feedback is embedded as a comment block at the top of main.tf
+=======
+  • FIXED: Duplicate NSG priority 4096 on DenyAllInbound + DenyAllOutbound
+    → unique priorities 4094 (Inbound) and 4095 (Outbound)
+
+  • FIXED: client_secret removed from variables.tf entirely
+    → sourced from Key Vault at runtime, never in state or plan output
+
+  • FIXED: var.action_group_id now declared in variables.tf
+    (was referenced in monitoring.tf but never declared → terraform validate error)
+
+  • FIXED: var.allowed_cidr default tightened from 0.0.0.0/0 → 10.0.0.0/8
+    (zero-trust: no public inbound by default)
+
+  • FIXED: container.tf depends_on subnet_nsg_association added
+    (ACI without NSG association caused race condition on first deploy)
+
+  • FIXED: Ansible handlers block was missing entirely — ansible-lint fatal error
+    → _ansible_handlers() now always emitted for declarative/hybrid
+
+  • FIXED: Imperative script was missing DenyAllOutbound NSG rule
+    → both Inbound and Outbound deny rules now added with unique priorities
+
+  • FIXED: private_endpoint.tf now included when network_isolation constraint set
+
+  • FIXED: rbac.tf now included when privilege_restriction constraint set
+    → user-assigned identity + Reader role assignment
+
+  • FIXED: var.key_vault_id declared in variables.tf when network_isolation set
+
+  • FIXED: outputs.tf now exports subnet_id (referenced by container.tf)
+
+  • NEW: _tf_keyvault_access.tf generated when privilege_restriction set
+    → Key Vault access policy granting the app identity get/list on secrets
+
+  • NEW: Error feedback is embedded as a comment block at the top of main.tf
+>>>>>>> 3820c0077c02f7f7f31a2770906854e88f81f1a0
     on retry attempts, giving the LLM (future) the full context it needs
 """
 from __future__ import annotations
@@ -90,6 +143,8 @@ def _ollama_generate(prompt: str) -> str:
         return ""
 # ── Data classes ──────────────────────────────────────────────────────────────
 
+# ── Data classes ──────────────────────────────────────────────────────────────
+
 @dataclass
 class IaCBundle:
     """
@@ -123,8 +178,18 @@ class IaCGeneratorAgent:
     def __init__(self) -> None:
         self._audit = get_audit()
 
+<<<<<<< HEAD
     def generate(self, policy_decision, strategy_decision,
              error_feedback: str = "", attempt: int = 1) -> IaCBundle:
+=======
+    def generate(
+        self,
+        policy_decision,
+        strategy_decision,
+        error_feedback: str = "",
+        attempt: int = 1,
+    ) -> IaCBundle:
+>>>>>>> 3820c0077c02f7f7f31a2770906854e88f81f1a0
         """
         Generate a complete IaCBundle.
 
@@ -141,7 +206,11 @@ class IaCGeneratorAgent:
         constraints = [c.constraint_type for c in policy_decision.constraints]
         method      = strategy_decision.method
         resources   = strategy_decision.estimated_resources
+<<<<<<< HEAD
     
+=======
+
+>>>>>>> 3820c0077c02f7f7f31a2770906854e88f81f1a0
         logger.info(
             "[%s] IaCGeneratorAgent.generate: method=%s constraints=%s attempt=%d feedback=%s",
             task_id, method, constraints, attempt,
@@ -170,11 +239,19 @@ class IaCGeneratorAgent:
         tf_files:  Dict[str, str] = {}
         ans_files: Dict[str, str] = {}
 
+<<<<<<< HEAD
         # ── Core infrastructure ────────────────────────
         tf_files["main.tf"]      = self._tf_main(task_id, constraints, resources, error_feedback, attempt)
         tf_files["variables.tf"] = self._tf_variables(constraints)
         tf_files["outputs.tf"]   = self._tf_outputs()
         tf_files["container.tf"] = self._tf_container(task_id)
+=======
+        # ── Core infrastructure (always generated) ────────────────────────
+        tf_files["main.tf"]      = self._tf_main(task_id, constraints, resources, error_feedback, attempt)
+        tf_files["variables.tf"] = self._tf_variables(constraints)
+        tf_files["outputs.tf"]   = self._tf_outputs()
+        tf_files["nsg.tf"]       = self._tf_nsg(constraints)
+>>>>>>> 3820c0077c02f7f7f31a2770906854e88f81f1a0
 
         # ── Declarative / hybrid: Ansible hardening ───────────────────────
         if method in ("declarative", "hybrid"):
@@ -200,6 +277,7 @@ class IaCGeneratorAgent:
             tf_files["rbac.tf"]             = self._tf_rbac()
             tf_files["keyvault_access.tf"]  = self._tf_keyvault_access(task_id)
 
+<<<<<<< HEAD
         # ── LLM-assisted fix on retry attempts ────────────────────────────
         if attempt > 1 and error_feedback and os.getenv("OLLAMA_ENABLED") == "true":
             llm_hint = _ollama_generate(
@@ -214,6 +292,8 @@ class IaCGeneratorAgent:
                 tf_files["llm_fix.tf"] = llm_hint
                 logger.info("[%s] Ollama provided IaC fix (attempt %d)", task_id, attempt)
 
+=======
+>>>>>>> 3820c0077c02f7f7f31a2770906854e88f81f1a0
         bundle = IaCBundle(
             task_id=task_id,
             method=method,
