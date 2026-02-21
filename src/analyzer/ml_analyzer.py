@@ -614,3 +614,125 @@ resource "azurerm_role_assignment" "app_reader" {
 
             echo "[6/6] Deployment complete."
         '''
+
+import secrets
+import time
+from typing import List
+
+from src.schemas.a2a_schemas import (
+    AgentRole, IRPayload, MessageType, MLRiskScore,
+    RiskAssessment, create_header,
+)
+
+
+class MLSecurityAnalyzer:
+    """
+    Rule-based + heuristic ML security analyzer.
+    Scores a batch of IRPayloads and returns a RiskAssessment.
+    """
+
+    def analyze_batch(self, ir_payloads: List[IRPayload], task_id: str) -> RiskAssessment:
+        file_scores: List[MLRiskScore] = []
+        high_risk_count = 0
+        total_ir_nodes = 0
+        anomalous_pattern_count = 0
+
+        for ir in ir_payloads:
+            score = self._score_single(ir)
+            file_scores.append(score)
+            total_ir_nodes += ir.total_nodes
+            anomalous_pattern_count += len(score.flagged_patterns)
+            if score.overall_risk >= 0.65:
+                high_risk_count += 1
+
+        aggregate_risk = (
+            float(sum(s.overall_risk for s in file_scores) / len(file_scores))
+            if file_scores else 0.0
+        )
+
+        # P90 aggregate: use 90th percentile if enough files
+        if len(file_scores) >= 5:
+            import statistics
+            sorted_risks = sorted(s.overall_risk for s in file_scores)
+            p90_idx = int(len(sorted_risks) * 0.9)
+            aggregate_risk = sorted_risks[p90_idx]
+
+        header = create_header(
+            MessageType.RISK_ASSESSMENT,
+            AgentRole.ML_ANALYZER,
+            AgentRole.POLICY_ENGINE,
+            task_id,
+        )
+
+        return RiskAssessment(
+            header=header,
+            task_id=task_id,
+            file_scores=file_scores,
+            aggregate_risk=min(aggregate_risk, 1.0),
+            high_risk_file_count=high_risk_count,
+            total_files=len(ir_payloads),
+            circular_dependency_count=0,
+            external_dependency_count=sum(ir.privilege_sensitive_count for ir in ir_payloads),
+            privileged_api_count=sum(ir.privilege_sensitive_count for ir in ir_payloads),
+            total_ir_nodes=total_ir_nodes,
+            anomalous_pattern_count=anomalous_pattern_count,
+        )
+
+    def _score_single(self, ir: IRPayload) -> MLRiskScore:
+        """Heuristic scoring for a single IRPayload."""
+        flagged: list = []
+
+        # Structural anomaly
+        structural = min(ir.total_nodes / 500.0, 1.0) * 0.3
+
+        # Privilege escalation
+        priv = min(ir.privilege_sensitive_count / 5.0, 1.0)
+        if priv > 0.5:
+            flagged.append("HIGH_PRIVILEGE")
+
+        # Network
+        net = min(ir.network_call_count / 5.0, 1.0)
+        if net > 0.5:
+            flagged.append("NETWORK_ACCESS")
+
+        # Dynamic eval
+        dyn = min(ir.dynamic_eval_count / 3.0, 1.0)
+        if dyn > 0.3:
+            flagged.append("DYNAMIC_EXECUTION")
+
+        # Obfuscation heuristic from node types
+        obf_count = sum(
+            1 for node in ir.ir_nodes if node.ir_type == "OBFUSC"
+        )
+        obfuscation = min(obf_count / 3.0, 1.0)
+        if obfuscation > 0.3:
+            flagged.append("OBFUSCATION")
+
+        # Backdoor: privilege + network together
+        backdoor = min((priv + net) / 2.0, 1.0) if priv > 0.3 and net > 0.3 else 0.0
+        if backdoor > 0.5:
+            flagged.append("BACKDOOR_PATTERN")
+
+        # Dependency abuse
+        dep_abuse = min(ir.network_call_count / 10.0 + obfuscation * 0.5, 1.0)
+
+        overall = min(
+            structural * 0.1
+            + priv * 0.25
+            + net * 0.2
+            + dyn * 0.25
+            + obfuscation * 0.1
+            + backdoor * 0.1,
+            1.0,
+        )
+
+        return MLRiskScore(
+            structural_anomaly_score=round(structural, 3),
+            dependency_abuse_score=round(dep_abuse, 3),
+            privilege_escalation_score=round(priv, 3),
+            obfuscation_score=round(obfuscation, 3),
+            backdoor_pattern_score=round(backdoor, 3),
+            overall_risk=round(overall, 3),
+            confidence=0.75,
+            flagged_patterns=flagged,
+        )

@@ -1,5 +1,3 @@
-"""a multi-language parser dispatcher that routes .py, .js, .ts, .go, etc. to appropriate parsers."""
-
 """
 Multi-Language Parser Dispatcher (parser.py)
 

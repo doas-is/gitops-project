@@ -69,7 +69,6 @@ def create_server_ssl_context(config: MTLSConfig) -> ssl.SSLContext:
     ctx.load_verify_locations(config.ca_path)
     ctx.verify_mode = ssl.CERT_REQUIRED
     # Strong cipher suites only
-    ctx.set_ciphers("TLS_AES_256_GCM_SHA384:TLS_CHACHA20_POLY1305_SHA256")
     return ctx
 
 
@@ -84,7 +83,6 @@ def create_client_ssl_context(config: MTLSConfig) -> ssl.SSLContext:
     ctx.load_verify_locations(config.ca_path)
     ctx.verify_mode = ssl.CERT_REQUIRED
     ctx.check_hostname = True
-    ctx.set_ciphers("TLS_AES_256_GCM_SHA384:TLS_CHACHA20_POLY1305_SHA256")
     return ctx
 
 

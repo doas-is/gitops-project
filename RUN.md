@@ -22,6 +22,10 @@ Copy the example env file and fill in values:
 
 ```bash
 cp .env.example .env
+
+
+# Retrieve credentials related to azure account 
+az ad sp create-for-rbac --name my-app --role Contributor --scopes /subscriptions/<SUBSCRIPTION_ID>
 ```
 
 Minimum required for **local/demo mode** (no Azure):

@@ -37,3 +37,5 @@ rich
 
 # Security
 cffi
+
+azure-keyvault-keys

@@ -2,12 +2,14 @@
 Monitoring Dashboard
 
 FastAPI app serving:
-  GET  /           → interactive HTML dashboard
-  GET  /api/tasks  → recent tasks
-  GET  /api/logs   → audit log entries
-  GET  /api/stats  → platform stats
-  POST /api/analyze → trigger analysis
-  WS   /ws         → real-time event stream
+  GET  /                → interactive HTML dashboard
+  GET  /api/tasks       → recent tasks
+  GET  /api/logs        → audit log entries
+  GET  /api/stats       → platform stats
+  POST /api/analyze     → trigger analysis
+  POST /api/hitl/{id}   → submit HITL decision
+  GET  /api/iac/{id}    → download IaC bundle for a task
+  WS   /ws              → real-time event stream
 """
 from __future__ import annotations
 
@@ -16,16 +18,18 @@ import json
 import logging
 import os
 import time
+import zipfile
+import io
 from collections import deque
 from typing import Any, Deque, Dict, List, Optional
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 
 logger = logging.getLogger(__name__)
 
-app = FastAPI(title="Secure Analysis Platform", version="2.0.0")
+app = FastAPI(title="Secure Analysis Platform", version="2.1.0")
 app.add_middleware(CORSMiddleware, allow_origins=["*"],
                    allow_methods=["*"], allow_headers=["*"])
 
@@ -35,6 +39,12 @@ _active_tasks: Dict[str, Dict] = {}
 _ws_clients: List[WebSocket] = []
 _stats = {"total_tasks": 0, "approved": 0, "rejected": 0,
           "hitl_escalated": 0, "start_time": time.time()}
+
+# Store IaC bundles keyed by task_id for download
+_iac_store: Dict[str, Dict] = {}
+
+# Pending HITL requests keyed by request_id
+_pending_hitl: Dict[str, Dict] = {}
 
 
 async def _broadcast(event: Dict) -> None:
@@ -55,6 +65,24 @@ def add_event(event_type: str, data: Dict, severity: str = "info") -> None:
     """Called from main.py pipeline stages."""
     event = {"type": event_type, "severity": severity, "data": data,
              "timestamp": time.time()}
+
+    # Cache IaC contents when stage completes
+    if event_type == "stage_update" and data.get("stage") == "iac" and data.get("status") == "complete":
+        task_id = data.get("task_id")
+        if task_id:
+            _iac_store[task_id] = {
+                "terraform": data.get("terraform_contents", {}),
+                "ansible": data.get("ansible_contents", {}),
+                "method": data.get("method", "declarative"),
+                "generated_at": time.time(),
+            }
+
+    # Cache HITL requests
+    if event_type == "hitl_required":
+        req_id = data.get("hitl_request_id")
+        if req_id:
+            _pending_hitl[req_id] = {**data, "status": "pending"}
+
     try:
         loop = asyncio.get_event_loop()
         if loop.is_running():
@@ -127,6 +155,141 @@ async def trigger_analysis(request: Dict[str, Any]) -> Dict:
     return {"task_id": task_id, "status": "started"}
 
 
+@app.get("/api/iac/{task_id}")
+async def download_iac(task_id: str, fmt: str = "zip") -> StreamingResponse:
+    """Download IaC bundle for a completed task as a zip file."""
+    bundle = _iac_store.get(task_id)
+    if not bundle:
+        from fastapi import HTTPException
+        raise HTTPException(status_code=404, detail="IaC bundle not found for this task")
+
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        for fname, content in bundle.get("terraform", {}).items():
+            zf.writestr(f"terraform/{fname}", content)
+        for fname, content in bundle.get("ansible", {}).items():
+            zf.writestr(f"ansible/{fname}", content)
+        # Add a README
+        readme = f"""# IaC Bundle — Task {task_id}
+Method: {bundle.get('method', 'unknown')}
+Generated: {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(bundle.get('generated_at', 0)))}
+
+## Terraform files
+{chr(10).join('- terraform/' + f for f in bundle.get('terraform', {}))}
+
+## Ansible files
+{chr(10).join('- ansible/' + f for f in bundle.get('ansible', {}))}
+
+## Usage
+```bash
+cd terraform/
+terraform init
+terraform plan
+terraform apply
+
+cd ../ansible/
+ansible-playbook site.yml
+```
+"""
+        zf.writestr("README.md", readme)
+
+    buf.seek(0)
+    return StreamingResponse(
+        buf,
+        media_type="application/zip",
+        headers={"Content-Disposition": f"attachment; filename=iac-bundle-{task_id[:8]}.zip"},
+    )
+
+
+@app.get("/api/iac/{task_id}/file")
+async def download_iac_file(task_id: str, path: str) -> StreamingResponse:
+    """Download a single IaC file."""
+    bundle = _iac_store.get(task_id)
+    if not bundle:
+        from fastapi import HTTPException
+        raise HTTPException(status_code=404, detail="IaC bundle not found")
+
+    # path like "terraform/main.tf" or "ansible/site.yml"
+    parts = path.split("/", 1)
+    if len(parts) == 2:
+        section, fname = parts
+        files = bundle.get(section, {})
+        content = files.get(fname)
+        if content is not None:
+            filename = fname.replace("/", "_")
+            return StreamingResponse(
+                io.BytesIO(content.encode()),
+                media_type="text/plain",
+                headers={"Content-Disposition": f"attachment; filename={filename}"},
+            )
+    from fastapi import HTTPException
+    raise HTTPException(status_code=404, detail=f"File not found: {path}")
+
+
+@app.get("/api/hitl")
+async def list_hitl() -> List[Dict]:
+    """List pending HITL requests."""
+    return list(_pending_hitl.values())
+
+
+@app.post("/api/hitl/{request_id}")
+async def submit_hitl(request_id: str, body: Dict[str, Any]) -> Dict:
+    """Submit a HITL decision (APPROVE or REJECT)."""
+    if request_id not in _pending_hitl:
+        from fastapi import HTTPException
+        raise HTTPException(status_code=404, detail="HITL request not found")
+
+    decision = body.get("decision", "").upper()
+    if decision not in ("APPROVE", "REJECT"):
+        return {"error": "decision must be APPROVE or REJECT"}
+
+    operator_id = body.get("operator_id", "human-operator")
+    notes = body.get("notes", "")
+
+    _pending_hitl[request_id]["status"] = "resolved"
+    _pending_hitl[request_id]["decision"] = decision
+    _pending_hitl[request_id]["operator_id"] = operator_id
+    _pending_hitl[request_id]["resolved_at"] = time.time()
+
+    # Broadcast HITL response event
+    task_id = _pending_hitl[request_id].get("task_id", "")
+    add_event("hitl_resolved", {
+        "task_id": task_id,
+        "hitl_request_id": request_id,
+        "decision": decision,
+        "operator_id": operator_id,
+        "notes": notes,
+        "message": f"✅ HITL resolved: {decision} by {operator_id}",
+    }, severity="info" if decision == "APPROVE" else "warning")
+
+    # Forward to policy engine if running
+    try:
+        from src.main import get_pipeline
+        from src.schemas.a2a_schemas import (
+            AgentRole, HITLResponse, MessageType, create_header,
+        )
+        import secrets
+        pipeline = get_pipeline()
+        header = create_header(
+            MessageType.HITL_RESPONSE,
+            AgentRole.HITL_ESCALATION,
+            AgentRole.POLICY_ENGINE,
+            task_id,
+        )
+        response = HITLResponse(
+            header=header,
+            request_id=request_id,
+            decision=decision,
+            operator_id=operator_id,
+            notes=notes,
+        )
+        await pipeline.policy_engine._hitl_responses.put(response)
+    except Exception as e:
+        logger.warning("Could not forward HITL response to pipeline: %s", e)
+
+    return {"status": "ok", "decision": decision, "request_id": request_id}
+
+
 async def _run_task(task_id: str, repo_url: str) -> None:
     try:
         from src.main import get_pipeline
@@ -164,6 +327,7 @@ async def ws_endpoint(ws: WebSocket) -> None:
                 "events": list(_events)[:100],
                 "stats": _stats,
                 "tasks": list(_active_tasks.values()),
+                "pending_hitl": list(_pending_hitl.values()),
             },
             "timestamp": time.time(),
         })
@@ -199,11 +363,9 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
 body{background:var(--bg);color:var(--text);font-family:'IBM Plex Sans',sans-serif;font-size:13px;min-height:100vh;overflow-x:hidden;}
 code,pre,.mono{font-family:'IBM Plex Mono',monospace;}
 
-/* Header */
 .hdr{background:var(--surface);border-bottom:1px solid var(--border);padding:10px 20px;
      display:flex;align-items:center;gap:14px;position:sticky;top:0;z-index:100;}
 .hdr-logo{display:flex;align-items:center;gap:8px;}
-.hdr-logo svg{flex-shrink:0;}
 .hdr-title{font-weight:700;font-size:15px;letter-spacing:-.3px;}
 .hdr-sub{font-size:11px;color:var(--muted);}
 .ws-badge{margin-left:auto;font-size:11px;padding:3px 8px;border-radius:99px;
@@ -211,9 +373,7 @@ code,pre,.mono{font-family:'IBM Plex Mono',monospace;}
 .ws-connected{color:var(--green);}
 .ws-disconnected{color:var(--red);}
 
-/* Layout */
-.layout{display:grid;grid-template-columns:340px 1fr 300px;grid-template-rows:auto 1fr;
-        gap:1px;background:var(--border);height:calc(100vh - 45px);}
+.layout{display:grid;grid-template-columns:340px 1fr 300px;gap:1px;background:var(--border);height:calc(100vh - 45px);}
 .panel{background:var(--bg);display:flex;flex-direction:column;overflow:hidden;}
 .panel-hdr{padding:10px 14px;border-bottom:1px solid var(--border);display:flex;
            align-items:center;gap:8px;font-size:11px;font-weight:600;letter-spacing:.8px;
@@ -222,10 +382,8 @@ code,pre,.mono{font-family:'IBM Plex Mono',monospace;}
                   border-radius:99px;font-size:10px;color:var(--text);}
 .panel-body{flex:1;overflow-y:auto;padding:12px;}
 .panel-body::-webkit-scrollbar{width:4px;}
-.panel-body::-webkit-scrollbar-track{background:transparent;}
 .panel-body::-webkit-scrollbar-thumb{background:var(--subtle);border-radius:2px;}
 
-/* Input bar */
 .input-bar{padding:10px 14px;border-bottom:1px solid var(--border);display:flex;gap:8px;flex-shrink:0;}
 .input-bar input{flex:1;background:var(--surface2);border:1px solid var(--border);color:var(--text);
                  padding:7px 12px;border-radius:6px;font-size:12px;font-family:inherit;outline:none;}
@@ -235,8 +393,12 @@ code,pre,.mono{font-family:'IBM Plex Mono',monospace;}
      font-family:inherit;font-weight:600;transition:.15s;}
 .btn-blue{background:var(--blue);color:#000;}
 .btn-blue:hover{opacity:.85;}
+.btn-green{background:var(--green);color:#000;}
+.btn-green:hover{opacity:.85;}
+.btn-red{background:var(--red);color:#000;}
+.btn-red:hover{opacity:.85;}
+.btn-sm{padding:4px 10px;font-size:11px;border-radius:4px;}
 
-/* Stats row */
 .stats-row{display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin-bottom:12px;}
 .stat-box{background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:10px 12px;}
 .stat-val{font-size:22px;font-weight:700;font-family:'IBM Plex Mono',monospace;margin-bottom:2px;}
@@ -246,61 +408,51 @@ code,pre,.mono{font-family:'IBM Plex Mono',monospace;}
 .stat-blue{color:var(--blue);}
 .stat-yellow{color:var(--yellow);}
 
-/* Pipeline viz */
 .pipeline{display:flex;align-items:center;gap:0;overflow-x:auto;padding:4px 0 8px;margin-bottom:12px;}
-.pip-stage{flex:1;min-width:78px;text-align:center;position:relative;}
-.pip-stage:not(:last-child)::after{content:'';position:absolute;right:-1px;top:50%;
-  transform:translateY(-50%);width:2px;height:60%;background:var(--border);z-index:1;}
-.pip-icon{width:36px;height:36px;border-radius:8px;margin:0 auto 4px;display:flex;
-          align-items:center;justify-content:center;font-size:16px;
-          border:1px solid var(--border);background:var(--surface);transition:.3s;}
-.pip-name{font-size:9px;color:var(--muted);letter-spacing:.3px;text-transform:uppercase;line-height:1.2;}
-.pip-stage.running .pip-icon{animation:pip-pulse 1s ease-in-out infinite;border-color:var(--blue);}
-.pip-stage.complete .pip-icon{background:var(--green-dim);border-color:var(--green);}
-.pip-stage.error .pip-icon{background:var(--red-dim);border-color:var(--red);}
-@keyframes pip-pulse{0%,100%{box-shadow:0 0 0 0 rgba(137,180,250,.4);}50%{box-shadow:0 0 0 6px rgba(137,180,250,0);}}
+.pip-stage{display:flex;flex-direction:column;align-items:center;gap:3px;padding:8px 10px;
+           border:1px solid var(--border);background:var(--surface);cursor:default;
+           min-width:64px;position:relative;transition:.2s;}
+.pip-stage:not(:last-child)::after{content:'›';position:absolute;right:-10px;
+  color:var(--muted);font-size:14px;z-index:1;}
+.pip-stage+.pip-stage{margin-left:8px;}
+.pip-icon{font-size:16px;}
+.pip-name{font-size:9px;color:var(--muted);letter-spacing:.5px;text-transform:uppercase;}
+.pip-stage.running{border-color:var(--blue);background:var(--blue-dim);}
+.pip-stage.running .pip-name{color:var(--blue);}
+.pip-stage.complete{border-color:var(--green);background:var(--green-dim);}
+.pip-stage.complete .pip-name{color:var(--green);}
+.pip-stage.error{border-color:var(--red);background:var(--red-dim);}
+.pip-stage.error .pip-name{color:var(--red);}
 
-/* Task cards */
 .task-card{background:var(--surface);border:1px solid var(--border);border-radius:8px;
-           padding:12px;margin-bottom:8px;transition:.2s;}
-.task-card:hover{border-color:var(--subtle);}
-.task-top{display:flex;align-items:center;gap:8px;margin-bottom:6px;}
-.task-id{font-family:'IBM Plex Mono',monospace;font-size:11px;color:var(--muted);}
-.task-repo{font-size:11px;color:var(--blue);overflow:hidden;text-overflow:ellipsis;
-           white-space:nowrap;margin-bottom:6px;}
-.risk-bar{height:3px;background:var(--surface2);border-radius:2px;margin:6px 0 4px;}
-.risk-fill{height:100%;border-radius:2px;transition:width .5s;}
-.risk-low{background:var(--green);}
-.risk-med{background:var(--yellow);}
-.risk-high{background:var(--orange);}
-.risk-crit{background:var(--red);}
-.task-meta{display:flex;gap:10px;font-size:10px;color:var(--muted);flex-wrap:wrap;}
-.task-meta span{display:flex;align-items:center;gap:3px;}
-.badge-small{font-size:10px;padding:2px 7px;border-radius:99px;font-weight:600;}
+           padding:10px 12px;margin-bottom:8px;}
+.task-top{display:flex;align-items:center;justify-content:space-between;margin-bottom:4px;}
+.task-id{font-family:'IBM Plex Mono',monospace;font-size:10px;color:var(--sky);}
+.task-repo{font-size:11px;color:var(--muted);margin-bottom:4px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+.badge-small{padding:2px 7px;border-radius:99px;font-size:9px;font-weight:700;letter-spacing:.5px;}
 .bg-green{background:var(--green-dim);color:var(--green);}
 .bg-red{background:var(--red-dim);color:var(--red);}
 .bg-yellow{background:var(--yellow-dim);color:var(--yellow);}
 .bg-blue{background:var(--blue-dim);color:var(--blue);}
 .bg-muted{background:var(--surface2);color:var(--muted);}
+.risk-bar{height:3px;border-radius:2px;margin-top:4px;}
+.risk-low{background:var(--green);}
+.risk-med{background:var(--yellow);}
+.risk-high{background:var(--orange);}
+.risk-crit{background:var(--red);}
 
-/* VM grid */
-.vm-grid{display:grid;grid-template-columns:repeat(2,1fr);gap:8px;}
-.vm-card{background:var(--surface);border:1px solid var(--border);border-radius:6px;
-         padding:8px 10px;transition:.3s;}
-.vm-card.running{border-color:var(--subtle);}
+.vm-grid{display:grid;grid-template-columns:1fr 1fr;gap:6px;}
+.vm-card{background:var(--surface);border:1px solid var(--border);border-radius:6px;padding:7px 9px;}
 .vm-card.terminated{opacity:.45;}
 .vm-role{font-size:10px;font-weight:600;letter-spacing:.3px;text-transform:uppercase;
          margin-bottom:3px;display:flex;align-items:center;gap:5px;}
 .vm-dot{width:6px;height:6px;border-radius:50%;flex-shrink:0;}
 .vm-dot.running{background:var(--green);animation:blink 1.5s ease infinite;}
 .vm-dot.terminated{background:var(--muted);}
-.vm-dot.provisioning{background:var(--blue);animation:blink 1s ease infinite;}
 @keyframes blink{0%,100%{opacity:1}50%{opacity:.3}}
 .vm-id{font-family:'IBM Plex Mono',monospace;font-size:9px;color:var(--muted);}
 .vm-ip{font-family:'IBM Plex Mono',monospace;font-size:9px;color:var(--teal);}
-.vm-age{font-size:9px;color:var(--muted);}
 
-/* Log */
 .log-entry{display:flex;gap:8px;padding:5px 0;border-bottom:1px solid var(--border);
            align-items:flex-start;font-size:11px;font-family:'IBM Plex Mono',monospace;}
 .log-entry:last-child{border-bottom:none;}
@@ -315,190 +467,140 @@ code,pre,.mono{font-family:'IBM Plex Mono',monospace;}
 .log-msg .stage-tag{color:var(--purple);margin-right:4px;}
 .log-msg .task-tag{color:var(--sky);margin-right:4px;}
 
-/* IaC preview */
+/* IaC panel */
 .iac-panel{background:var(--surface);border:1px solid var(--border);border-radius:8px;
            margin-bottom:8px;overflow:hidden;}
-.iac-head{padding:8px 12px;background:var(--surface2);border-bottom:1px solid var(--border);
+.iac-head{padding:7px 12px;background:var(--surface2);border-bottom:1px solid var(--border);
           display:flex;align-items:center;gap:8px;font-size:11px;font-weight:600;}
+.iac-head .iac-fname{flex:1;font-family:'IBM Plex Mono',monospace;font-size:10px;color:var(--sky);}
 .iac-body{padding:10px 12px;font-family:'IBM Plex Mono',monospace;font-size:10px;
-          color:var(--muted);max-height:120px;overflow-y:auto;line-height:1.6;}
-.iac-kw{color:var(--purple);}
-.iac-str{color:var(--green);}
-.iac-comment{color:var(--muted);}
+          color:var(--muted);max-height:140px;overflow-y:auto;line-height:1.6;white-space:pre-wrap;}
+.download-btn{padding:3px 8px;border-radius:4px;border:1px solid var(--border);background:var(--surface2);
+              color:var(--blue);font-size:10px;cursor:pointer;font-family:inherit;white-space:nowrap;}
+.download-btn:hover{background:var(--blue-dim);}
 
-/* Empty states */
+/* HITL panel */
+.hitl-card{background:#1a1200;border:2px solid var(--yellow);border-radius:8px;padding:12px;margin-bottom:10px;}
+.hitl-title{color:var(--yellow);font-weight:700;font-size:12px;margin-bottom:6px;}
+.hitl-info{font-size:11px;color:var(--muted);margin-bottom:8px;line-height:1.6;}
+.hitl-actions{display:flex;gap:8px;}
+
 .empty{text-align:center;color:var(--muted);padding:24px;font-size:12px;}
 
-/* Azure topology */
-.topology{position:relative;height:180px;background:var(--surface);border:1px solid var(--border);
+.topology{position:relative;height:160px;background:var(--surface);border:1px solid var(--border);
           border-radius:8px;margin-bottom:12px;overflow:hidden;}
+.topo-box{position:absolute;border:1px solid var(--border);background:var(--surface2);
+          border-radius:4px;display:flex;align-items:center;justify-content:center;font-size:9px;text-align:center;}
+.topo-rg{left:8px;top:8px;right:8px;bottom:8px;background:transparent;border-style:dashed;}
+.topo-vnet{left:20px;top:20px;right:20px;bottom:20px;background:transparent;border-color:var(--blue);border-style:dashed;}
+.topo-subnet{left:36px;top:36px;right:36px;bottom:50px;background:var(--surface);flex-direction:column;gap:4px;padding:6px;}
+.topo-nsg{right:12px;bottom:12px;width:50px;height:32px;border-color:var(--red);font-size:8px;}
+.topo-aci{left:12px;bottom:12px;width:60px;height:32px;border-color:var(--green);}
 .topo-label{position:absolute;font-size:9px;color:var(--muted);letter-spacing:.5px;text-transform:uppercase;}
-.topo-box{position:absolute;border:1px solid;border-radius:6px;padding:4px 8px;font-size:9px;
-          font-weight:600;text-align:center;transition:.5s;}
-.topo-rg{top:10px;left:10px;right:10px;bottom:10px;border-color:var(--border);border-radius:10px;
-         background:transparent;pointer-events:none;}
-.topo-vnet{top:30px;left:20px;width:200px;height:120px;border-color:var(--blue-dim);
-           background:rgba(137,180,250,.04);}
-.topo-subnet{top:55px;left:30px;width:180px;height:70px;border-color:var(--subtle);
-             background:rgba(137,180,250,.02);}
-.topo-nsg{top:30px;right:20px;width:100px;border-color:var(--orange);
-          background:rgba(250,179,135,.06);color:var(--orange);}
-.topo-aci{top:60px;right:30px;width:80px;border-color:var(--teal);
-          background:rgba(148,226,213,.06);color:var(--teal);}
-.topo-agent{border-color:var(--blue);background:rgba(137,180,250,.08);color:var(--blue);}
-.topo-agent.active{border-color:var(--blue);box-shadow:0 0 8px rgba(137,180,250,.3);}
-
-/* Scrollbar for small panels */
-.scrollable{overflow-y:auto;max-height:100%;}
-.scrollable::-webkit-scrollbar{width:3px;}
-.scrollable::-webkit-scrollbar-thumb{background:var(--subtle);}
 </style>
 </head>
 <body>
-
 <div class="hdr">
   <div class="hdr-logo">
-    <svg width="28" height="28" viewBox="0 0 28 28" fill="none">
-      <path d="M14 2L3 8v8c0 6.08 4.7 11.74 11 12.94C20.3 27.74 25 22.08 25 16V8L14 2z"
-            fill="rgba(137,180,250,.12)" stroke="#89b4fa" stroke-width="1.5"/>
-      <path d="M9.5 14l3.5 3.5 6.5-6.5" stroke="#a6e3a1" stroke-width="2"
-            stroke-linecap="round" stroke-linejoin="round"/>
+    <svg width="22" height="22" viewBox="0 0 22 22" fill="none">
+      <rect width="22" height="22" rx="4" fill="#1e2538"/>
+      <path d="M11 4L18 8V14L11 18L4 14V8L11 4Z" stroke="#89b4fa" stroke-width="1.5" fill="none"/>
+      <circle cx="11" cy="11" r="2.5" fill="#a6e3a1"/>
     </svg>
     <div>
       <div class="hdr-title">Secure Analysis Platform</div>
       <div class="hdr-sub">Zero-trust · mTLS · AES-256 · Ephemeral µVMs</div>
     </div>
   </div>
-  <div id="ws-status" class="ws-badge ws-disconnected">● disconnected</div>
+  <span id="ws-status" class="ws-badge ws-disconnected">● disconnected</span>
 </div>
 
 <div class="layout">
 
-  <!-- LEFT: Input + Tasks -->
+  <!-- LEFT: input + stats + task list -->
   <div class="panel">
     <div class="input-bar">
-      <input id="repo-url" type="text"
-             placeholder="https://github.com/owner/repo"
-             autocomplete="off"/>
+      <input id="repo-url" type="text" placeholder="https://github.com/owner/repo" />
       <button class="btn btn-blue" onclick="analyze()">Analyze</button>
     </div>
-
-    <div class="panel-hdr">
-      📊 Stats
-    </div>
-    <div style="padding:10px 12px;flex-shrink:0;">
+    <div class="panel-body">
       <div class="stats-row">
-        <div class="stat-box">
-          <div class="stat-val stat-blue" id="s-total">0</div>
-          <div class="stat-lbl">Total</div>
-        </div>
-        <div class="stat-box">
-          <div class="stat-val stat-green" id="s-approved">0</div>
-          <div class="stat-lbl">Approved</div>
-        </div>
-        <div class="stat-box">
-          <div class="stat-val stat-red" id="s-rejected">0</div>
-          <div class="stat-lbl">Rejected</div>
-        </div>
-        <div class="stat-box">
-          <div class="stat-val stat-yellow" id="s-hitl">0</div>
-          <div class="stat-lbl">HITL</div>
-        </div>
+        <div class="stat-box"><div class="stat-val stat-blue" id="s-total">0</div><div class="stat-lbl">Total</div></div>
+        <div class="stat-box"><div class="stat-val stat-green" id="s-approved">0</div><div class="stat-lbl">Approved</div></div>
+        <div class="stat-box"><div class="stat-val stat-red" id="s-rejected">0</div><div class="stat-lbl">Rejected</div></div>
+        <div class="stat-box"><div class="stat-val stat-yellow" id="s-hitl">0</div><div class="stat-lbl">HITL</div></div>
       </div>
-    </div>
 
-    <div class="panel-hdr">🔁 Pipeline <span class="badge" id="task-count">0</span></div>
-    <div class="panel-body" id="task-list">
-      <div class="empty">Enter a GitHub URL to start analysis</div>
+      <!-- HITL pending panel -->
+      <div id="hitl-panel" style="display:none;margin-bottom:12px;">
+        <div style="font-size:11px;font-weight:700;color:var(--yellow);margin-bottom:6px;letter-spacing:.5px;">⚠️ HUMAN-IN-THE-LOOP REQUIRED</div>
+        <div id="hitl-requests"></div>
+      </div>
+
+      <div class="panel-hdr" style="padding:0 0 8px;border:none;">🔁 Pipeline <span class="badge" id="task-count">0</span></div>
+      <div id="task-list"><div class="empty">Enter a GitHub URL to start analysis</div></div>
     </div>
   </div>
 
-  <!-- CENTER: Azure topology + pipeline stages + IaC preview -->
+  <!-- CENTER: pipeline + IaC preview -->
   <div class="panel">
-    <div class="panel-hdr">🌐 Azure Environment</div>
-    <div class="panel-body">
 
-      <!-- Azure topology diagram -->
-      <div class="topology" id="topology">
+    <!-- Azure topology -->
+    <div style="padding:10px 14px 0;flex-shrink:0;">
+      <div class="topology">
         <div class="topo-box topo-rg"></div>
         <div class="topo-label" style="top:12px;left:16px;">Resource Group</div>
         <div class="topo-box topo-vnet">
-          <div style="font-size:8px;color:var(--blue);margin-bottom:2px;">VNet 10.0.0.0/16</div>
-          <div class="topo-box topo-subnet" style="position:relative;left:0;top:0;width:auto;height:auto;margin:2px 0;">
-            <span style="color:var(--sky)">Subnet 10.0.1.0/24</span>
-            <div id="topo-agents" style="display:flex;flex-wrap:wrap;gap:4px;margin-top:4px;justify-content:center;"></div>
+          <div class="topo-box topo-subnet">
+            <div style="font-size:9px;color:var(--blue);margin-bottom:2px;">Subnet 10.0.1.0/24</div>
+            <div id="topo-agents" style="display:flex;flex-wrap:wrap;gap:3px;justify-content:center;"></div>
           </div>
         </div>
-        <div class="topo-box topo-nsg" id="topo-nsg">NSG<br><span style="font-size:8px;font-weight:400;color:var(--muted)">DenyAll</span></div>
-        <div class="topo-box topo-aci" id="topo-aci" style="display:none;">ACI<br><span style="font-size:8px">sandbox</span></div>
+        <div class="topo-box topo-nsg">NSG<br><span style="font-size:7px;color:var(--muted)">DenyAll</span></div>
+        <div class="topo-box topo-aci" id="topo-aci" style="display:none;">ACI sandbox</div>
       </div>
+    </div>
 
-      <!-- Pipeline stages -->
-      <div class="pipeline" id="pipeline-viz">
-        <div class="pip-stage" id="pip-fetch" data-role="secure_fetcher">
-          <div class="pip-icon">🌐</div>
-          <div class="pip-name">Fetch</div>
-        </div>
-        <div class="pip-stage" id="pip-parse" data-role="ast_parser">
-          <div class="pip-icon">🌳</div>
-          <div class="pip-name">Parse</div>
-        </div>
-        <div class="pip-stage" id="pip-ir" data-role="ir_builder">
-          <div class="pip-icon">⚙️</div>
-          <div class="pip-name">IR Build</div>
-        </div>
-        <div class="pip-stage" id="pip-ml" data-role="ml_analyzer">
-          <div class="pip-icon">🤖</div>
-          <div class="pip-name">ML Score</div>
-        </div>
-        <div class="pip-stage" id="pip-policy" data-role="policy_engine">
-          <div class="pip-icon">⚖️</div>
-          <div class="pip-name">Policy</div>
-        </div>
-        <div class="pip-stage" id="pip-strategy" data-role="strategy_agent">
-          <div class="pip-icon">🗺️</div>
-          <div class="pip-name">Strategy</div>
-        </div>
-        <div class="pip-stage" id="pip-iac" data-role="iac_generator">
-          <div class="pip-icon">📄</div>
-          <div class="pip-name">IaC Gen</div>
-        </div>
-        <div class="pip-stage" id="pip-deploy" data-role="deployment_agent">
-          <div class="pip-icon">🚀</div>
-          <div class="pip-name">Deploy</div>
-        </div>
+    <!-- Pipeline stages -->
+    <div style="padding:4px 14px 0;flex-shrink:0;overflow-x:auto;">
+      <div class="pipeline">
+        <div class="pip-stage" id="pip-fetch"><div class="pip-icon">🌐</div><div class="pip-name">Fetch</div></div>
+        <div class="pip-stage" id="pip-parse"><div class="pip-icon">🌳</div><div class="pip-name">Parse</div></div>
+        <div class="pip-stage" id="pip-ir"><div class="pip-icon">⚙️</div><div class="pip-name">IR Build</div></div>
+        <div class="pip-stage" id="pip-ml"><div class="pip-icon">🤖</div><div class="pip-name">ML Score</div></div>
+        <div class="pip-stage" id="pip-policy"><div class="pip-icon">⚖️</div><div class="pip-name">Policy</div></div>
+        <div class="pip-stage" id="pip-strategy"><div class="pip-icon">🗺️</div><div class="pip-name">Strategy</div></div>
+        <div class="pip-stage" id="pip-iac"><div class="pip-icon">📄</div><div class="pip-name">IaC Gen</div></div>
+        <div class="pip-stage" id="pip-deploy"><div class="pip-icon">🚀</div><div class="pip-name">Deploy</div></div>
       </div>
+    </div>
 
-      <!-- Current stage detail -->
+    <!-- Stage detail -->
+    <div style="padding:0 14px;flex-shrink:0;margin-bottom:8px;">
       <div id="stage-detail" style="background:var(--surface);border:1px solid var(--border);
-           border-radius:8px;padding:10px 14px;margin-bottom:12px;min-height:44px;
-           font-size:12px;color:var(--muted);">
+           border-radius:8px;padding:10px 14px;min-height:44px;font-size:12px;color:var(--muted);">
         Awaiting analysis...
       </div>
-
-      <!-- IaC preview (appears after stage 7) -->
-      <div id="iac-preview" style="display:none;">
-        <div class="panel-hdr" style="padding:8px 0;border:none;">📋 Generated IaC</div>
-        <div id="iac-files"></div>
-      </div>
-
     </div>
+
+    <!-- IaC preview + downloads -->
+    <div id="iac-preview" style="display:none;flex:1;overflow-y:auto;padding:0 14px 14px;">
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px;">
+        <div style="font-size:11px;font-weight:700;color:var(--text);letter-spacing:.5px;">📋 GENERATED IaC FILES</div>
+        <button class="btn btn-blue btn-sm" id="dl-all-btn" onclick="downloadAll()">⬇ Download All (.zip)</button>
+      </div>
+      <div id="iac-files"></div>
+    </div>
+
   </div>
 
   <!-- RIGHT: VMs + Audit Log -->
   <div class="panel">
-    <div class="panel-hdr">
-      💻 µVMs <span class="badge" id="vm-count">0</span>
-    </div>
+    <div class="panel-hdr">💻 µVMs <span class="badge" id="vm-count">0</span></div>
     <div style="padding:10px;flex-shrink:0;border-bottom:1px solid var(--border);">
-      <div class="vm-grid" id="vm-grid">
-        <div class="empty" style="grid-column:span 2;">No active VMs</div>
-      </div>
+      <div class="vm-grid" id="vm-grid"><div class="empty" style="grid-column:span 2;">No active VMs</div></div>
     </div>
-
-    <div class="panel-hdr">
-      📋 Audit Log <span class="badge" id="log-count">0</span>
-    </div>
+    <div class="panel-hdr">📋 Audit Log <span class="badge" id="log-count">0</span></div>
     <div class="panel-body" id="log-panel"></div>
   </div>
 
@@ -508,10 +610,13 @@ code,pre,.mono{font-family:'IBM Plex Mono',monospace;}
 let ws = null;
 let stats = {total_tasks:0, approved:0, rejected:0, hitl_escalated:0};
 let tasks = [];
-let vms = {};        // vm_id → record
+let vms = {};
 let logs = [];
 let currentTask = null;
-let pipelineState = {};  // stage → status
+let currentTaskId = null;
+let pipelineState = {};
+let iacContents = {terraform:{}, ansible:{}, method:''};
+let pendingHitl = {};
 
 const STAGE_MAP = {
   fetch:'pip-fetch', parse:'pip-parse', ir:'pip-ir', ml:'pip-ml',
@@ -539,12 +644,12 @@ function setWS(ok) {
   el.className = 'ws-badge ' + (ok ? 'ws-connected' : 'ws-disconnected');
 }
 
-/* ── Event handler ── */
 function handle(msg) {
   if (msg.type === 'init') {
     stats = msg.data.stats || stats;
     (msg.data.tasks || []).forEach(t => { tasks.unshift(t); currentTask = t; });
     (msg.data.events || []).forEach(e => processEvent(e, false));
+    (msg.data.pending_hitl || []).forEach(h => { if(h.status==='pending') pendingHitl[h.hitl_request_id]=h; });
     renderAll(); return;
   }
   processEvent(msg, true);
@@ -561,7 +666,9 @@ function processEvent(ev, live) {
   switch (ev.type) {
     case 'task_started':
       currentTask = {task_id:tid, repo_url:d.repo_url, status:'running', started_at:ev.timestamp};
+      currentTaskId = tid;
       pipelineState = {};
+      iacContents = {terraform:{}, ansible:{}, method:''};
       resetPipeline();
       break;
 
@@ -572,32 +679,41 @@ function processEvent(ev, live) {
         setStage(STAGE_MAP[stage], d.status);
       }
       setDetail(d);
-      if (stage === 'iac' && d.status === 'complete') showIaC(d);
-      if (d.status === 'complete' && STAGE_MAP[stage]) {
-        // auto-set next to running visually if still in pipeline
-        const stages = Object.keys(STAGE_MAP);
-        const idx = stages.indexOf(stage);
-        if (idx >= 0 && idx < stages.length - 1) {
-          const next = stages[idx + 1];
-          // will be set by next stage_update
-        }
+      if (stage === 'iac' && d.status === 'complete') {
+        iacContents = {
+          terraform: d.terraform_contents || {},
+          ansible: d.ansible_contents || {},
+          method: d.method || '',
+          task_id: tid,
+        };
+        showIaC(d);
       }
       if (currentTask) currentTask.last_stage = stage;
       break;
     }
 
+    case 'hitl_required':
+      pendingHitl[d.hitl_request_id] = {...d, status:'pending'};
+      renderHitl();
+      break;
+
+    case 'hitl_resolved':
+      if (pendingHitl[d.hitl_request_id]) {
+        pendingHitl[d.hitl_request_id].status = 'resolved';
+      }
+      renderHitl();
+      break;
+
     case 'vm_created':
       vms[d.vm_id] = {...d, status:'running', created_at: ev.timestamp || Date.now()/1000};
       break;
-
     case 'vm_terminated':
       if (vms[d.vm_id]) vms[d.vm_id].status = 'terminated';
       break;
 
     case 'environment_teardown':
-      // mark all VMs terminated
       Object.values(vms).forEach(v => v.status = 'terminated');
-      setDetail({message:'🧹 Ephemeral environment destroyed — VMs deleted. Audit log preserved.', stage:'teardown', status:'complete'});
+      setDetail({message:'🧹 Ephemeral environment destroyed — audit log preserved.', stage:'teardown', status:'complete'});
       break;
 
     case 'task_complete':
@@ -610,6 +726,15 @@ function processEvent(ev, live) {
       if (d.hitl_required) stats.hitl_escalated = (stats.hitl_escalated||0)+1;
       tasks = tasks.slice(0,20);
       if (d.decision === 'REJECT') setAllStages('error');
+      // Update IaC contents from task_complete event too
+      if (d.terraform_contents) {
+        iacContents = {
+          terraform: d.terraform_contents || {},
+          ansible: d.ansible_contents || {},
+          method: d.deployment_method || '',
+          task_id: tid,
+        };
+      }
       break;
 
     case 'task_failed':
@@ -623,6 +748,7 @@ function processEvent(ev, live) {
 function resetPipeline() {
   Object.values(STAGE_MAP).forEach(id => setStage(id, 'idle'));
   document.getElementById('iac-preview').style.display = 'none';
+  document.getElementById('iac-files').innerHTML = '';
   document.getElementById('stage-detail').textContent = 'Starting analysis...';
   document.getElementById('topo-aci').style.display = 'none';
   document.getElementById('topo-agents').innerHTML = '';
@@ -631,9 +757,10 @@ function resetPipeline() {
 function setStage(pipId, status) {
   const el = document.getElementById(pipId);
   if (!el) return;
-  el.className = 'pip-stage ' + (status === 'running' ? 'running' :
-                                  status === 'complete' ? 'complete' :
-                                  status === 'error' ? 'error' : '');
+  el.className = 'pip-stage ' + (
+    status === 'running' ? 'running' :
+    status === 'complete' ? 'complete' :
+    status === 'error' ? 'error' : '');
 }
 
 function setAllStages(status) {
@@ -645,30 +772,118 @@ function setDetail(d) {
   const stage = d.stage || '';
   const msg = d.message || '';
   const status = d.status || 'info';
-  const icon = status === 'running' ? '⟳' : status === 'complete' ? '✓' : status === 'error' ? '✗' : '·';
-  const col = status === 'complete' ? 'var(--green)' : status === 'error' ? 'var(--red)' :
-              status === 'running' ? 'var(--blue)' : 'var(--muted)';
+  const icon = status==='running'?'⟳':status==='complete'?'✓':status==='error'?'✗':'·';
+  const col = status==='complete'?'var(--green)':status==='error'?'var(--red)':
+              status==='running'?'var(--blue)':'var(--muted)';
   el.innerHTML = `<span style="color:${col};margin-right:6px;">${icon}</span>
     <span style="color:var(--purple);margin-right:4px;">[${stage.toUpperCase()}]</span>
     <span>${msg}</span>`;
 }
 
+/* ── IaC display + download ── */
 function showIaC(d) {
   const preview = document.getElementById('iac-preview');
-  const files = document.getElementById('iac-files');
-  preview.style.display = 'block';
-  const tfFiles = d.terraform_files || [];
-  const ansFiles = d.ansible_files || [];
-  files.innerHTML = '';
-  [...tfFiles.map(f=>({f,type:'tf'})), ...ansFiles.map(f=>({f,type:'yml'}))].forEach(({f,type}) => {
-    const icon = type === 'tf' ? '🟣' : '🟡';
+  const filesDiv = document.getElementById('iac-files');
+  preview.style.display = 'flex';
+  preview.style.flexDirection = 'column';
+  filesDiv.innerHTML = '';
+
+  const tf = d.terraform_contents || {};
+  const ans = d.ansible_contents || {};
+  const tid = d.task_id || currentTaskId || '';
+
+  const allFiles = [
+    ...Object.entries(tf).map(([f, c]) => ({f, c, type:'terraform', icon:'🟦', color:'var(--blue)'})),
+    ...Object.entries(ans).map(([f, c]) => ({f, c, type:'ansible', icon:'🟡', color:'var(--yellow)'})),
+  ];
+
+  if (allFiles.length === 0) {
+    filesDiv.innerHTML = '<div class="empty">No IaC files generated</div>';
+    return;
+  }
+
+  allFiles.forEach(({f, c, type, icon, color}) => {
     const div = document.createElement('div');
     div.className = 'iac-panel';
-    div.innerHTML = `<div class="iac-head">${icon} ${f}</div>
-      <div class="iac-body"><span class="iac-comment"># Generated Terraform/Ansible — mTLS enforced, NSG applied</span></div>`;
-    files.appendChild(div);
+    const escaped = (c || '# (empty)').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+    div.innerHTML = `
+      <div class="iac-head">
+        <span style="color:${color}">${icon}</span>
+        <span class="iac-fname">${type}/${f}</span>
+        <button class="download-btn" onclick="downloadFile('${tid}','${type}/${f}','${f}')">⬇ ${f}</button>
+      </div>
+      <div class="iac-body">${escaped}</div>`;
+    filesDiv.appendChild(div);
   });
+
   document.getElementById('topo-aci').style.display = 'block';
+}
+
+function downloadFile(taskId, path, filename) {
+  // If we have contents in memory, download directly
+  const parts = path.split('/');
+  const section = parts[0];
+  const fname = parts.slice(1).join('/');
+  const content = iacContents[section] && iacContents[section][fname];
+  if (content) {
+    const blob = new Blob([content], {type:'text/plain'});
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = filename;
+    a.click();
+    return;
+  }
+  // Fallback: fetch from server
+  window.open(`/api/iac/${taskId}/file?path=${encodeURIComponent(path)}`, '_blank');
+}
+
+function downloadAll() {
+  const tid = iacContents.task_id || currentTaskId;
+  if (!tid) return;
+  // Check if we have contents in memory
+  const tfCount = Object.keys(iacContents.terraform || {}).length;
+  const ansCount = Object.keys(iacContents.ansible || {}).length;
+  if (tfCount + ansCount === 0) return;
+  // Build zip in browser using JSZip (if available) or fallback to server
+  window.open(`/api/iac/${tid}`, '_blank');
+}
+
+/* ── HITL ── */
+function renderHitl() {
+  const pending = Object.values(pendingHitl).filter(h => h.status === 'pending');
+  const panel = document.getElementById('hitl-panel');
+  const container = document.getElementById('hitl-requests');
+  if (!pending.length) { panel.style.display = 'none'; return; }
+  panel.style.display = 'block';
+  container.innerHTML = pending.map(h => `
+    <div class="hitl-card">
+      <div class="hitl-title">⚠️ HITL Request — Task ${(h.task_id||'').slice(0,8)}</div>
+      <div class="hitl-info">
+        <b>Reason:</b> ${h.reason || ''}<br>
+        <b>Risk:</b> ${((h.aggregate_risk||0)*100).toFixed(0)}%<br>
+        <b>Recommended:</b> ${h.recommended_action || ''}<br>
+        <b>Patterns:</b> ${(h.flagged_patterns||[]).join(', ') || 'none'}
+      </div>
+      <div class="hitl-actions">
+        <button class="btn btn-green btn-sm" onclick="resolveHitl('${h.hitl_request_id}','APPROVE')">✓ Approve</button>
+        <button class="btn btn-red btn-sm" onclick="resolveHitl('${h.hitl_request_id}','REJECT')">✗ Reject</button>
+      </div>
+    </div>`).join('');
+}
+
+async function resolveHitl(reqId, decision) {
+  const operator = prompt(`Operator ID (leave blank for "operator"):`) || 'operator';
+  const notes = prompt(`Notes for ${decision}:`) || '';
+  try {
+    const r = await fetch(`/api/hitl/${reqId}`, {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({decision, operator_id: operator, notes}),
+    });
+    const d = await r.json();
+    if (d.error) { alert(d.error); return; }
+    if (pendingHitl[reqId]) pendingHitl[reqId].status = 'resolved';
+    renderHitl();
+  } catch(e) { alert('Failed to submit HITL decision: ' + e); }
 }
 
 /* ── VM grid ── */
@@ -677,35 +892,24 @@ function renderVMs() {
   const agents = document.getElementById('topo-agents');
   const active = Object.values(vms);
   const running = active.filter(v => v.status === 'running');
-
   document.getElementById('vm-count').textContent = running.length;
-
   if (!active.length) {
     grid.innerHTML = '<div class="empty" style="grid-column:span 2;">No VMs</div>';
-    agents.innerHTML = '';
-    return;
+    agents.innerHTML = ''; return;
   }
-
   grid.innerHTML = active.map(v => {
     const col = ROLE_COLORS[v.role] || '#6c7086';
     const age = v.created_at ? Math.floor((Date.now()/1000) - v.created_at) : 0;
     return `<div class="vm-card ${v.status}">
-      <div class="vm-role">
-        <div class="vm-dot ${v.status}" style="background:${v.status==='running'?col:'var(--muted)'}"></div>
-        ${(v.role||'').replace(/_/g,' ')}
-      </div>
+      <div class="vm-role"><div class="vm-dot ${v.status}" style="background:${v.status==='running'?col:'var(--muted)'}"></div>${(v.role||'').replace(/_/g,' ')}</div>
       <div class="vm-id">${v.vm_id||''}</div>
       <div class="vm-ip">${v.private_ip||''}</div>
-      <div class="vm-age">${age}s</div>
+      <div style="font-size:9px;color:var(--muted)">${age}s</div>
     </div>`;
   }).join('');
-
-  // Update topology
   agents.innerHTML = running.map(v => {
     const col = ROLE_COLORS[v.role] || '#89b4fa';
-    return `<div style="background:rgba(137,180,250,.06);border:1px solid ${col};
-      border-radius:4px;padding:2px 5px;font-size:8px;color:${col};">
-      ${(v.role||'').replace(/_/g,'_').slice(0,10)}</div>`;
+    return `<div style="background:rgba(137,180,250,.06);border:1px solid ${col};border-radius:3px;padding:2px 5px;font-size:8px;color:${col};">${(v.role||'').slice(0,10)}</div>`;
   }).join('');
 }
 
@@ -713,36 +917,22 @@ function renderVMs() {
 function renderTasks() {
   const el = document.getElementById('task-list');
   document.getElementById('task-count').textContent = tasks.length;
-  if (!tasks.length) {
-    el.innerHTML = '<div class="empty">No tasks yet</div>'; return;
-  }
+  if (!tasks.length) { el.innerHTML = '<div class="empty">No tasks yet</div>'; return; }
   el.innerHTML = tasks.slice(0,10).map(t => {
     const risk = t.aggregate_risk || 0;
-    const rClass = risk > .7 ? 'risk-crit' : risk > .5 ? 'risk-high' :
-                   risk > .25 ? 'risk-med' : 'risk-low';
+    const rClass = risk>.7?'risk-crit':risk>.5?'risk-high':risk>.25?'risk-med':'risk-low';
     const dec = t.decision;
-    const dClass = dec === 'APPROVE' ? 'bg-green' : dec === 'REJECT' ? 'bg-red' :
-                   dec === 'APPROVE_WITH_CONSTRAINTS' ? 'bg-yellow' :
-                   t.status === 'running' ? 'bg-blue' : 'bg-muted';
-    const dText = dec || t.status || 'running';
+    const dClass = dec==='APPROVE'?'bg-green':dec==='REJECT'?'bg-red':
+                   dec==='APPROVE_WITH_CONSTRAINTS'?'bg-yellow':
+                   t.status==='running'?'bg-blue':'bg-muted';
     const repo = (t.repo_url||'').replace('https://github.com/','');
-    const method = t.deployment_method;
     return `<div class="task-card">
       <div class="task-top">
         <span class="task-id">${(t.task_id||'').slice(0,12)}</span>
-        <span class="badge-small ${dClass}">${dText}</span>
+        <span class="badge-small ${dClass}">${dec||t.status||'running'}</span>
       </div>
       <div class="task-repo">⎇ ${repo||'unknown'}</div>
-      ${risk > 0 ? `<div class="risk-bar"><div class="risk-fill ${rClass}"
-        style="width:${(risk*100).toFixed(0)}%"></div></div>` : ''}
-      <div class="task-meta">
-        <span>🎯 ${(risk*100).toFixed(0)}%</span>
-        <span>📁 ${t.total_files||0} files</span>
-        ${t.high_risk_files ? `<span style="color:var(--red)">⚠ ${t.high_risk_files} high-risk</span>`:''}
-        ${method ? `<span style="color:var(--teal)">⚙ ${method}</span>`:''}
-        ${t.hitl_required ? `<span style="color:var(--yellow)">👤 HITL</span>`:''}
-        ${t.duration_seconds ? `<span>${t.duration_seconds.toFixed(1)}s</span>`:''}
-      </div>
+      ${risk>0?`<div class="risk-bar ${rClass}" style="width:${(risk*100).toFixed(0)}%"></div>`:''}
     </div>`;
   }).join('');
 }
@@ -759,16 +949,14 @@ function renderStats() {
 function renderLog() {
   const el = document.getElementById('log-panel');
   document.getElementById('log-count').textContent = logs.length;
-  if (!logs.length) { el.innerHTML = '<div class="empty">No events yet</div>'; return; }
-  el.innerHTML = logs.slice(0,150).map(ev => {
-    const t = new Date((ev.timestamp||Date.now()/1000)*1000);
-    const ts = t.toTimeString().slice(0,8);
-    const sev = ev.severity || 'info';
+  if (!logs.length) { el.innerHTML = '<div class="empty">No events</div>'; return; }
+  el.innerHTML = logs.slice(0,100).map(ev => {
     const d = ev.data || {};
-    const stage = d.stage || ev.type.replace(/_/g,' ');
-    const msg = d.message || ev.type;
-    const sevClass = sev==='success'?'sev-success':sev==='error'?'sev-error':
-                     sev==='warning'?'sev-warning':'sev-info';
+    const ts = new Date((ev.timestamp||0)*1000).toLocaleTimeString();
+    const sev = ev.severity || 'info';
+    const msg = d.message || ev.type || '';
+    const stage = d.stage || '';
+    const sevClass = sev==='error'?'sev-error':sev==='success'?'sev-success':sev==='warning'?'sev-warning':'sev-info';
     return `<div class="log-entry">
       <span class="log-time">${ts}</span>
       <span class="log-sev ${sevClass}">${sev.slice(0,4).toUpperCase()}</span>
@@ -782,7 +970,7 @@ function renderLog() {
 }
 
 function renderAll() {
-  renderStats(); renderTasks(); renderVMs(); renderLog();
+  renderStats(); renderTasks(); renderVMs(); renderLog(); renderHitl();
 }
 
 /* ── Analyze trigger ── */
@@ -808,7 +996,7 @@ document.getElementById('repo-url').addEventListener('keydown', e => {
   if (e.key === 'Enter') analyze();
 });
 
-setInterval(renderVMs, 1000);  // refresh VM ages
+setInterval(renderVMs, 1000);
 connect();
 </script>
 </body>
