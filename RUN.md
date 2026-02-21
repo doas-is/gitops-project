@@ -90,8 +90,8 @@ az keyvault key create `
 
 # ── 5. RBAC role assignments for your service principal ───────────
 # Object ID of your SP (the oid, not appId)
-$SP_OID = "2d8e5b61-fcc3-4d73-8d54-1c50194c7d9e"
-$SUB    = "15f02690-1964-4602-8eb8-2419c4051414"
+$SP_OID = "<SUBSCRIPTION_OID>"
+$SUB    = "<SUBSCRIPTION_ID>"
 $KV_SCOPE = "/subscriptions/$SUB/resourceGroups/rg-secure-analysis/providers/Microsoft.KeyVault/vaults/kv-secanalysis"
 
 # Crypto Officer — allows encrypt/decrypt/wrap/unwrap
