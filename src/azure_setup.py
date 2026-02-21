@@ -294,7 +294,8 @@ class MicroVMOrchestrator:
         Returns MicroVMRecord with private IP and cert.
         """
         vm_id    = secrets.token_hex(8)
-        cg_name  = f"sap-{agent_role[:10]}-{vm_id}"
+        safe_role = agent_role.replace("_", "-")[:10]
+        cg_name   = f"sap-{safe_role}-{vm_id}"
         tag      = task_id[:8]
 
         logger.info("[%s] Provisioning ACI: %s role=%s", task_id, cg_name, agent_role)
@@ -341,19 +342,26 @@ class MicroVMOrchestrator:
         # CPU/memory by role
         cpu, mem = {
             "secure_fetcher":  (0.5, 0.5),
-            "ast_parser":      (1.0, 1.0),
-            "ir_builder":      (1.0, 1.0),
-            "ml_analyzer":     (2.0, 2.0),
+            "ast_parser":      (0.25, 0.5),
+            "ir_builder":      (0.5, 0.5),
+            "ml_analyzer":     (1.0, 1.0),
             "policy_engine":   (0.5, 0.5),
             "strategy_agent":  (0.5, 0.5),
             "iac_generator":   (0.5, 0.5),
-            "deployment_agent":(1.0, 1.0),
-        }.get(agent_role, (0.5, 0.5))
+            "deployment_agent":(0.5, 0.5),
+        }.get(agent_role, (0.25, 0.5))
 
         cg_params = ContainerGroup(
             location=self._location,
             os_type=OperatingSystemTypes.LINUX,
-            restart_policy="Never",   # ephemeral — never restart
+            restart_policy="Never",
+            image_registry_credentials=[
+                ImageRegistryCredential(
+                    server=f"{os.getenv('ACR_NAME', '')}.azurecr.io",
+                    username=os.getenv("ACR_USERNAME", ""),
+                    password=os.getenv("ACR_PASSWORD", ""),
+                )
+            ] if os.getenv("ACR_NAME") else None,
             containers=[
                 Container(
                     name=cg_name,

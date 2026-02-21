@@ -413,158 +413,216 @@ async def ws_endpoint(ws: WebSocket) -> None:
 # ── HTML Dashboard ─────────────────────────────────────────────────
 
 DASHBOARD_HTML = r"""<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Secure Analysis Platform</title>
-<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;600&family=IBM+Plex+Sans:wght@400;500;700&display=swap" rel="stylesheet">
-<style>
-:root {
-  --bg:#0b0e14; --surface:#111520; --surface2:#181d2a; --border:#1e2538;
-  --text:#cdd6f4; --muted:#6c7086; --subtle:#313552;
-  --green:#a6e3a1; --red:#f38ba8; --yellow:#f9e2af; --blue:#89b4fa;
-  --purple:#cba6f7; --orange:#fab387; --teal:#94e2d5; --sky:#89dceb;
-  --green-dim:#2a3d2a; --red-dim:#3d1f1f; --yellow-dim:#3a3020; --blue-dim:#1a2a3d;
-}
-*{box-sizing:border-box;margin:0;padding:0;}
-body{background:var(--bg);color:var(--text);font-family:'IBM Plex Sans',sans-serif;font-size:13px;min-height:100vh;overflow-x:hidden;}
-code,pre,.mono{font-family:'IBM Plex Mono',monospace;}
+    <html lang="en">
+    <head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width,initial-scale=1">
+    <title>Secure Analysis Platform</title>
+    <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;600&family=IBM+Plex+Sans:wght@400;500;700&display=swap" rel="stylesheet">
+    <style>
+    :root {
+      --bg:#0b0e14; --surface:#111520; --surface2:#181d2a; --border:#1e2538;
+      --text:#cdd6f4; --muted:#6c7086; --subtle:#313552;
+      --green:#a6e3a1; --red:#f38ba8; --yellow:#f9e2af; --blue:#89b4fa;
+      --purple:#cba6f7; --orange:#fab387; --teal:#94e2d5; --sky:#89dceb;
+      --green-dim:#2a3d2a; --red-dim:#3d1f1f; --yellow-dim:#3a3020; --blue-dim:#1a2a3d;
+    }
+    *{box-sizing:border-box;margin:0;padding:0;}
+    body{background:var(--bg);color:var(--text);font-family:'IBM Plex Sans',sans-serif;font-size:13px;min-height:100vh;overflow-x:hidden;}
+    code,pre,.mono{font-family:'IBM Plex Mono',monospace;}
 
-.hdr{background:var(--surface);border-bottom:1px solid var(--border);padding:10px 20px;
-     display:flex;align-items:center;gap:14px;position:sticky;top:0;z-index:100;}
-.hdr-logo{display:flex;align-items:center;gap:8px;}
-.hdr-title{font-weight:700;font-size:15px;letter-spacing:-.3px;}
-.hdr-sub{font-size:11px;color:var(--muted);}
-.ws-badge{margin-left:auto;font-size:11px;padding:3px 8px;border-radius:99px;
-          border:1px solid currentColor;font-family:'IBM Plex Mono',monospace;}
-.ws-connected{color:var(--green);}
-.ws-disconnected{color:var(--red);}
+    .hdr{background:var(--surface);border-bottom:1px solid var(--border);padding:10px 20px;
+        display:flex;align-items:center;gap:14px;position:sticky;top:0;z-index:100;}
+    .hdr-logo{display:flex;align-items:center;gap:8px;}
+    .hdr-title{font-weight:700;font-size:15px;letter-spacing:-.3px;}
+    .hdr-sub{font-size:11px;color:var(--muted);}
+    .ws-badge{margin-left:auto;font-size:11px;padding:3px 8px;border-radius:99px;
+              border:1px solid currentColor;font-family:'IBM Plex Mono',monospace;}
+    .ws-connected{color:var(--green);}
+    .ws-disconnected{color:var(--red);}
 
-.layout{display:grid;grid-template-columns:340px 1fr 300px;gap:1px;background:var(--border);height:calc(100vh - 45px);}
-.panel{background:var(--bg);display:flex;flex-direction:column;overflow:hidden;}
-.panel-hdr{padding:10px 14px;border-bottom:1px solid var(--border);display:flex;
-           align-items:center;gap:8px;font-size:11px;font-weight:600;letter-spacing:.8px;
-           text-transform:uppercase;color:var(--muted);flex-shrink:0;}
-.panel-hdr .badge{margin-left:auto;background:var(--surface2);padding:2px 7px;
-                  border-radius:99px;font-size:10px;color:var(--text);}
-.panel-body{flex:1;overflow-y:auto;padding:12px;}
-.panel-body::-webkit-scrollbar{width:4px;}
-.panel-body::-webkit-scrollbar-thumb{background:var(--subtle);border-radius:2px;}
+    .layout{display:grid;grid-template-columns:340px 1fr 300px;gap:1px;background:var(--border);height:calc(100vh - 45px);}
+    .panel{background:var(--bg);display:flex;flex-direction:column;overflow:hidden;}
+    .panel-hdr{padding:10px 14px;border-bottom:1px solid var(--border);display:flex;
+              align-items:center;gap:8px;font-size:11px;font-weight:600;letter-spacing:.8px;
+              text-transform:uppercase;color:var(--muted);flex-shrink:0;}
+    .panel-hdr .badge{margin-left:auto;background:var(--surface2);padding:2px 7px;
+                      border-radius:99px;font-size:10px;color:var(--text);}
+    .panel-body{flex:1;overflow-y:auto;padding:12px;}
+    .panel-body::-webkit-scrollbar{width:4px;}
+    .panel-body::-webkit-scrollbar-thumb{background:var(--subtle);border-radius:2px;}
 
-.input-bar{padding:10px 14px;border-bottom:1px solid var(--border);display:flex;gap:8px;flex-shrink:0;}
-.input-bar input{flex:1;background:var(--surface2);border:1px solid var(--border);color:var(--text);
-                 padding:7px 12px;border-radius:6px;font-size:12px;font-family:inherit;outline:none;}
-.input-bar input:focus{border-color:var(--blue);}
-.input-bar input::placeholder{color:var(--muted);}
-.btn{padding:7px 14px;border-radius:6px;border:none;cursor:pointer;font-size:12px;
-     font-family:inherit;font-weight:600;transition:.15s;}
-.btn-blue{background:var(--blue);color:#000;}
-.btn-blue:hover{opacity:.85;}
-.btn-green{background:var(--green);color:#000;}
-.btn-green:hover{opacity:.85;}
-.btn-red{background:var(--red);color:#000;}
-.btn-red:hover{opacity:.85;}
-.btn-sm{padding:4px 10px;font-size:11px;border-radius:4px;}
+    .input-bar{padding:10px 14px;border-bottom:1px solid var(--border);display:flex;gap:8px;flex-shrink:0;}
+    .input-bar input{flex:1;background:var(--surface2);border:1px solid var(--border);color:var(--text);
+                    padding:7px 12px;border-radius:6px;font-size:12px;font-family:inherit;outline:none;}
+    .input-bar input:focus{border-color:var(--blue);}
+    .input-bar input::placeholder{color:var(--muted);}
+    .btn{padding:7px 14px;border-radius:6px;border:none;cursor:pointer;font-size:12px;
+        font-family:inherit;font-weight:600;transition:.15s;}
+    .btn-blue{background:var(--blue);color:#000;}
+    .btn-blue:hover{opacity:.85;}
+    .btn-green{background:var(--green);color:#000;}
+    .btn-green:hover{opacity:.85;}
+    .btn-red{background:var(--red);color:#000;}
+    .btn-red:hover{opacity:.85;}
+    .btn-sm{padding:4px 10px;font-size:11px;border-radius:4px;}
 
-.stats-row{display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin-bottom:12px;}
-.stat-box{background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:10px 12px;}
-.stat-val{font-size:22px;font-weight:700;font-family:'IBM Plex Mono',monospace;margin-bottom:2px;}
-.stat-lbl{font-size:10px;color:var(--muted);letter-spacing:.5px;text-transform:uppercase;}
-.stat-green{color:var(--green);}
-.stat-red{color:var(--red);}
-.stat-blue{color:var(--blue);}
-.stat-yellow{color:var(--yellow);}
+    .stats-row{display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin-bottom:12px;}
+    .stat-box{background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:10px 12px;}
+    .stat-val{font-size:22px;font-weight:700;font-family:'IBM Plex Mono',monospace;margin-bottom:2px;}
+    .stat-lbl{font-size:10px;color:var(--muted);letter-spacing:.5px;text-transform:uppercase;}
+    .stat-green{color:var(--green);}
+    .stat-red{color:var(--red);}
+    .stat-blue{color:var(--blue);}
+    .stat-yellow{color:var(--yellow);}
 
-.pipeline{display:flex;align-items:center;gap:0;overflow-x:auto;padding:4px 0 8px;margin-bottom:12px;}
-.pip-stage{display:flex;flex-direction:column;align-items:center;gap:3px;padding:8px 10px;
-           border:1px solid var(--border);background:var(--surface);cursor:default;
-           min-width:64px;position:relative;transition:.2s;}
-.pip-stage:not(:last-child)::after{content:'›';position:absolute;right:-10px;
-  color:var(--muted);font-size:14px;z-index:1;}
-.pip-stage+.pip-stage{margin-left:8px;}
-.pip-icon{font-size:16px;}
-.pip-name{font-size:9px;color:var(--muted);letter-spacing:.5px;text-transform:uppercase;}
-.pip-stage.running{border-color:var(--blue);background:var(--blue-dim);}
-.pip-stage.running .pip-name{color:var(--blue);}
-.pip-stage.complete{border-color:var(--green);background:var(--green-dim);}
-.pip-stage.complete .pip-name{color:var(--green);}
-.pip-stage.error{border-color:var(--red);background:var(--red-dim);}
-.pip-stage.error .pip-name{color:var(--red);}
+    .pipeline{display:flex;align-items:center;gap:0;overflow-x:auto;padding:4px 0 8px;margin-bottom:12px;}
+    .pip-stage{display:flex;flex-direction:column;align-items:center;gap:3px;padding:8px 10px;
+              border:1px solid var(--border);background:var(--surface);cursor:default;
+              min-width:64px;position:relative;transition:.2s;}
+    .pip-stage:not(:last-child)::after{content:'›';position:absolute;right:-10px;
+      color:var(--muted);font-size:14px;z-index:1;}
+    .pip-stage+.pip-stage{margin-left:8px;}
+    .pip-icon{font-size:16px;}
+    .pip-name{font-size:9px;color:var(--muted);letter-spacing:.5px;text-transform:uppercase;}
+    .pip-stage.running{border-color:var(--blue);background:var(--blue-dim);}
+    .pip-stage.running .pip-name{color:var(--blue);}
+    .pip-stage.complete{border-color:var(--green);background:var(--green-dim);}
+    .pip-stage.complete .pip-name{color:var(--green);}
+    .pip-stage.error{border-color:var(--red);background:var(--red-dim);}
+    .pip-stage.error .pip-name{color:var(--red);}
 
-.task-card{background:var(--surface);border:1px solid var(--border);border-radius:8px;
-           padding:10px 12px;margin-bottom:8px;}
-.task-top{display:flex;align-items:center;justify-content:space-between;margin-bottom:4px;}
-.task-id{font-family:'IBM Plex Mono',monospace;font-size:10px;color:var(--sky);}
-.task-repo{font-size:11px;color:var(--muted);margin-bottom:4px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
-.badge-small{padding:2px 7px;border-radius:99px;font-size:9px;font-weight:700;letter-spacing:.5px;}
-.bg-green{background:var(--green-dim);color:var(--green);}
-.bg-red{background:var(--red-dim);color:var(--red);}
-.bg-yellow{background:var(--yellow-dim);color:var(--yellow);}
-.bg-blue{background:var(--blue-dim);color:var(--blue);}
-.bg-muted{background:var(--surface2);color:var(--muted);}
-.risk-bar{height:3px;border-radius:2px;margin-top:4px;}
-.risk-low{background:var(--green);}
-.risk-med{background:var(--yellow);}
-.risk-high{background:var(--orange);}
-.risk-crit{background:var(--red);}
+    .task-card{background:var(--surface);border:1px solid var(--border);border-radius:8px;
+              padding:10px 12px;margin-bottom:8px;}
+    .task-top{display:flex;align-items:center;justify-content:space-between;margin-bottom:4px;}
+    .task-id{font-family:'IBM Plex Mono',monospace;font-size:10px;color:var(--sky);}
+    .task-repo{font-size:11px;color:var(--muted);margin-bottom:4px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+    .badge-small{padding:2px 7px;border-radius:99px;font-size:9px;font-weight:700;letter-spacing:.5px;}
+    .bg-green{background:var(--green-dim);color:var(--green);}
+    .bg-red{background:var(--red-dim);color:var(--red);}
+    .bg-yellow{background:var(--yellow-dim);color:var(--yellow);}
+    .bg-blue{background:var(--blue-dim);color:var(--blue);}
+    .bg-muted{background:var(--surface2);color:var(--muted);}
+    .risk-bar{height:3px;border-radius:2px;margin-top:4px;}
+    .risk-low{background:var(--green);}
+    .risk-med{background:var(--yellow);}
+    .risk-high{background:var(--orange);}
+    .risk-crit{background:var(--red);}
 
-.vm-grid{display:grid;grid-template-columns:1fr 1fr;gap:6px;}
-.vm-card{background:var(--surface);border:1px solid var(--border);border-radius:6px;padding:7px 9px;}
-.vm-card.terminated{opacity:.45;}
-.vm-role{font-size:10px;font-weight:600;letter-spacing:.3px;text-transform:uppercase;
-         margin-bottom:3px;display:flex;align-items:center;gap:5px;}
-.vm-dot{width:6px;height:6px;border-radius:50%;flex-shrink:0;}
-.vm-dot.running{background:var(--green);animation:blink 1.5s ease infinite;}
-.vm-dot.terminated{background:var(--muted);}
-@keyframes blink{0%,100%{opacity:1}50%{opacity:.3}}
-.vm-id{font-family:'IBM Plex Mono',monospace;font-size:9px;color:var(--muted);}
-.vm-ip{font-family:'IBM Plex Mono',monospace;font-size:9px;color:var(--teal);}
+    .vm-grid{display:grid;grid-template-columns:1fr 1fr;gap:6px;}
+    .vm-card{background:var(--surface);border:1px solid var(--border);border-radius:6px;padding:7px 9px;}
+    .vm-card.terminated{opacity:.45;}
+    .vm-role{font-size:10px;font-weight:600;letter-spacing:.3px;text-transform:uppercase;
+            margin-bottom:3px;display:flex;align-items:center;gap:5px;}
+    .vm-dot{width:6px;height:6px;border-radius:50%;flex-shrink:0;}
+    .vm-dot.running{background:var(--green);animation:blink 1.5s ease infinite;}
+    .vm-dot.terminated{background:var(--muted);}
+    @keyframes blink{0%,100%{opacity:1}50%{opacity:.3}}
+    .vm-id{font-family:'IBM Plex Mono',monospace;font-size:9px;color:var(--muted);}
+    .vm-ip{font-family:'IBM Plex Mono',monospace;font-size:9px;color:var(--teal);}
 
-.log-entry{display:flex;gap:8px;padding:5px 0;border-bottom:1px solid var(--border);
-           align-items:flex-start;font-size:11px;font-family:'IBM Plex Mono',monospace;}
-.log-entry:last-child{border-bottom:none;}
-.log-time{color:var(--muted);flex-shrink:0;width:68px;}
-.log-sev{flex-shrink:0;width:54px;text-align:center;border-radius:3px;
-         padding:1px 4px;font-size:9px;font-weight:700;letter-spacing:.5px;}
-.sev-info{background:var(--blue-dim);color:var(--blue);}
-.sev-success{background:var(--green-dim);color:var(--green);}
-.sev-warning{background:var(--yellow-dim);color:var(--yellow);}
-.sev-error{background:var(--red-dim);color:var(--red);}
-.log-msg{flex:1;color:var(--text);line-height:1.4;word-break:break-word;}
-.log-msg .stage-tag{color:var(--purple);margin-right:4px;}
-.log-msg .task-tag{color:var(--sky);margin-right:4px;}
+    .log-entry{display:flex;gap:8px;padding:5px 0;border-bottom:1px solid var(--border);
+              align-items:flex-start;font-size:11px;font-family:'IBM Plex Mono',monospace;}
+    .log-entry:last-child{border-bottom:none;}
+    .log-time{color:var(--muted);flex-shrink:0;width:68px;}
+    .log-sev{flex-shrink:0;width:54px;text-align:center;border-radius:3px;
+            padding:1px 4px;font-size:9px;font-weight:700;letter-spacing:.5px;}
+    .sev-info{background:var(--blue-dim);color:var(--blue);}
+    .sev-success{background:var(--green-dim);color:var(--green);}
+    .sev-warning{background:var(--yellow-dim);color:var(--yellow);}
+    .sev-error{background:var(--red-dim);color:var(--red);}
+    .log-msg{flex:1;color:var(--text);line-height:1.4;word-break:break-word;}
+    .log-msg .stage-tag{color:var(--purple);margin-right:4px;}
+    .log-msg .task-tag{color:var(--sky);margin-right:4px;}
 
-/* IaC panel */
-.iac-panel{background:var(--surface);border:1px solid var(--border);border-radius:8px;
-           margin-bottom:8px;overflow:hidden;}
-.iac-head{padding:7px 12px;background:var(--surface2);border-bottom:1px solid var(--border);
-          display:flex;align-items:center;gap:8px;font-size:11px;font-weight:600;}
-.iac-head .iac-fname{flex:1;font-family:'IBM Plex Mono',monospace;font-size:10px;color:var(--sky);}
-.iac-body{padding:10px 12px;font-family:'IBM Plex Mono',monospace;font-size:10px;
-          color:var(--muted);max-height:140px;overflow-y:auto;line-height:1.6;white-space:pre-wrap;}
-.download-btn{padding:3px 8px;border-radius:4px;border:1px solid var(--border);background:var(--surface2);
-              color:var(--blue);font-size:10px;cursor:pointer;font-family:inherit;white-space:nowrap;}
-.download-btn:hover{background:var(--blue-dim);}
+    /* IaC panel */
+    .iac-panel{background:var(--surface);border:1px solid var(--border);border-radius:8px;
+              margin-bottom:8px;overflow:hidden;}
+    .iac-head{padding:7px 12px;background:var(--surface2);border-bottom:1px solid var(--border);
+              display:flex;align-items:center;gap:8px;font-size:11px;font-weight:600;}
+    .iac-head .iac-fname{flex:1;font-family:'IBM Plex Mono',monospace;font-size:10px;color:var(--sky);}
+    .iac-body{padding:10px 12px;font-family:'IBM Plex Mono',monospace;font-size:10px;
+              color:var(--muted);max-height:140px;overflow-y:auto;line-height:1.6;white-space:pre-wrap;}
+    .download-btn{padding:3px 8px;border-radius:4px;border:1px solid var(--border);background:var(--surface2);
+                  color:var(--blue);font-size:10px;cursor:pointer;font-family:inherit;white-space:nowrap;}
+    .download-btn:hover{background:var(--blue-dim);}
 
-/* HITL panel */
-.hitl-card{background:#1a1200;border:2px solid var(--yellow);border-radius:8px;padding:12px;margin-bottom:10px;}
-.hitl-title{color:var(--yellow);font-weight:700;font-size:12px;margin-bottom:6px;}
-.hitl-info{font-size:11px;color:var(--muted);margin-bottom:8px;line-height:1.6;}
-.hitl-actions{display:flex;gap:8px;}
+    /* HITL panel */
+    .hitl-card{background:#1a1200;border:2px solid var(--yellow);border-radius:8px;padding:12px;margin-bottom:10px;}
+    .hitl-title{color:var(--yellow);font-weight:700;font-size:12px;margin-bottom:6px;}
+    .hitl-info{font-size:11px;color:var(--muted);margin-bottom:8px;line-height:1.6;}
+    .hitl-actions{display:flex;gap:8px;}
 
-.empty{text-align:center;color:var(--muted);padding:24px;font-size:12px;}
+    .empty{text-align:center;color:var(--muted);padding:24px;font-size:12px;}
 
-.topology{position:relative;height:160px;background:var(--surface);border:1px solid var(--border);
-          border-radius:8px;margin-bottom:12px;overflow:hidden;}
-.topo-box{position:absolute;border:1px solid var(--border);background:var(--surface2);
-          border-radius:4px;display:flex;align-items:center;justify-content:center;font-size:9px;text-align:center;}
-.topo-rg{left:8px;top:8px;right:8px;bottom:8px;background:transparent;border-style:dashed;}
-.topo-vnet{left:20px;top:20px;right:20px;bottom:20px;background:transparent;border-color:var(--blue);border-style:dashed;}
-.topo-subnet{left:36px;top:36px;right:36px;bottom:50px;background:var(--surface);flex-direction:column;gap:4px;padding:6px;}
-.topo-nsg{right:12px;bottom:12px;width:50px;height:32px;border-color:var(--red);font-size:8px;}
-.topo-aci{left:12px;bottom:12px;width:60px;height:32px;border-color:var(--green);}
-.topo-label{position:absolute;font-size:9px;color:var(--muted);letter-spacing:.5px;text-transform:uppercase;}
+    /* ── Resource Map ──────────────────────────────────────────────────── */
+    .res-map{position:relative;background:var(--surface);border:1px solid var(--border);
+            border-radius:10px;margin-bottom:12px;overflow:hidden;min-height:220px;
+            font-family:'IBM Plex Mono',monospace;}
+    .res-map-title{padding:8px 14px;font-size:10px;font-weight:700;letter-spacing:.8px;
+                  text-transform:uppercase;color:var(--muted);border-bottom:1px solid var(--border);
+                  display:flex;align-items:center;justify-content:space-between;}
+    .res-map-title span{color:var(--blue);}
+    .res-map-body{padding:12px 14px;position:relative;}
+
+    /* Resource group frame */
+    .rg-frame{border:1px dashed #313552;border-radius:8px;padding:10px;position:relative;
+              background:rgba(30,37,56,0.4);}
+    .rg-label{position:absolute;top:-9px;left:12px;background:var(--surface);
+              padding:0 6px;font-size:9px;color:var(--muted);letter-spacing:.5px;white-space:nowrap;}
+
+    /* VNet frame inside RG */
+    .vnet-frame{border:1px dashed #1e4a7a;border-radius:6px;padding:8px;position:relative;
+                margin-top:6px;background:rgba(137,180,250,0.03);}
+    .vnet-label{position:absolute;top:-8px;left:10px;background:var(--surface);
+                padding:0 5px;font-size:9px;color:var(--blue);letter-spacing:.3px;white-space:nowrap;}
+
+    /* Subnet frame inside VNet */
+    .subnet-frame{border:1px solid #1e2538;border-radius:5px;padding:8px;position:relative;
+                  background:rgba(20,25,40,0.5);min-height:52px;}
+    .subnet-label{position:absolute;top:-8px;left:8px;background:var(--surface);
+                  padding:0 5px;font-size:9px;color:var(--teal);letter-spacing:.3px;white-space:nowrap;}
+
+    /* NSG badge — floats top-right of RG frame */
+    .nsg-badge{position:absolute;top:8px;right:8px;border:1px solid var(--red);
+                border-radius:5px;padding:4px 8px;font-size:9px;display:flex;
+                align-items:center;gap:4px;background:rgba(243,139,168,0.05);}
+    .nsg-badge.active{border-color:var(--red);color:var(--red);}
+    .nsg-badge.inactive{border-color:var(--muted);color:var(--muted);}
+
+    /* KeyVault badge */
+    .kv-badge{position:absolute;bottom:8px;right:8px;border:1px solid var(--purple);
+              border-radius:5px;padding:4px 8px;font-size:9px;display:flex;
+              align-items:center;gap:4px;background:rgba(203,166,247,0.05);color:var(--purple);}
+
+    /* Resource node inside subnet */
+    .res-nodes{display:flex;flex-wrap:wrap;gap:5px;align-items:center;min-height:38px;}
+    .res-node{display:flex;align-items:center;gap:4px;border-radius:5px;padding:4px 8px;
+              font-size:9px;border:1px solid;transition:all .3s ease;position:relative;
+              cursor:default;white-space:nowrap;}
+    .res-node.spawning{animation:nodeSpawn .4s ease;}
+    .res-node.running{opacity:1;}
+    .res-node.terminated{opacity:.35;filter:grayscale(1);text-decoration:line-through;}
+    .res-node .res-dot{width:5px;height:5px;border-radius:50%;flex-shrink:0;}
+    .res-node.running .res-dot{animation:blink 1.4s ease infinite;}
+    .res-node .res-name{font-family:'IBM Plex Mono',monospace;font-size:8px;max-width:90px;
+                        overflow:hidden;text-overflow:ellipsis;}
+
+    /* Destroyed overlay */
+    .res-map.destroyed .rg-frame{border-color:#f38ba833;opacity:.5;}
+    .res-map.destroyed .vnet-frame{border-color:#f38ba822;}
+    .res-map-destroyed-banner{display:none;position:absolute;inset:0;background:rgba(11,14,20,.75);
+      z-index:10;align-items:center;justify-content:center;flex-direction:column;gap:6px;
+      border-radius:10px;font-size:12px;color:var(--red);font-weight:700;letter-spacing:.5px;}
+    .res-map.destroyed .res-map-destroyed-banner{display:flex;}
+
+    /* Tooltip */
+    .res-node:hover::after{content:attr(data-tip);position:absolute;bottom:calc(100% + 4px);
+      left:50%;transform:translateX(-50%);background:#0b0e14;border:1px solid var(--border);
+      border-radius:4px;padding:4px 8px;font-size:9px;white-space:nowrap;z-index:20;
+      color:var(--text);pointer-events:none;}
+
+    @keyframes nodeSpawn{0%{transform:scale(.6);opacity:0}60%{transform:scale(1.08)}100%{transform:scale(1);opacity:1}}
 </style>
 </head>
 <body>
@@ -613,19 +671,48 @@ code,pre,.mono{font-family:'IBM Plex Mono',monospace;}
   <!-- CENTER: pipeline + IaC preview -->
   <div class="panel">
 
-    <!-- Azure topology -->
+    <!-- Azure Resource Map -->
     <div style="padding:10px 14px 0;flex-shrink:0;">
-      <div class="topology">
-        <div class="topo-box topo-rg"></div>
-        <div class="topo-label" style="top:12px;left:16px;">Resource Group</div>
-        <div class="topo-box topo-vnet">
-          <div class="topo-box topo-subnet">
-            <div style="font-size:9px;color:var(--blue);margin-bottom:2px;">Subnet 10.0.1.0/24</div>
-            <div id="topo-agents" style="display:flex;flex-wrap:wrap;gap:3px;justify-content:center;"></div>
+      <div class="res-map" id="res-map">
+        <div class="res-map-title">
+          ☁️ Azure Resource Map
+          <span id="res-map-status">idle</span>
+        </div>
+        <div class="res-map-body">
+          <!-- Destroyed overlay -->
+          <div class="res-map-destroyed-banner">
+            🗑️ ENVIRONMENT DESTROYED<br>
+            <span style="font-size:9px;color:var(--muted);font-weight:400">Audit log preserved · All ACIs deleted</span>
+          </div>
+
+          <!-- Resource Group frame -->
+          <div class="rg-frame" id="rg-frame">
+            <div class="rg-label" id="rg-label">📦 Resource Group · <span id="rg-name">—</span></div>
+
+            <!-- NSG badge top-right -->
+            <div class="nsg-badge inactive" id="nsg-badge">
+              <span>🛡️</span><span id="nsg-name">NSG</span>
+            </div>
+
+            <!-- VNet frame -->
+            <div class="vnet-frame" id="vnet-frame">
+              <div class="vnet-label">🌐 VNet · <span id="vnet-name">—</span></div>
+
+              <!-- Subnet frame -->
+              <div class="subnet-frame">
+                <div class="subnet-label">🔗 Subnet 10.0.1.0/24</div>
+                <div class="res-nodes" id="res-nodes">
+                  <div style="color:var(--muted);font-size:9px;padding:4px;">Waiting for containers...</div>
+                </div>
+              </div>
+            </div>
+
+            <!-- Key Vault badge bottom-right -->
+            <div class="kv-badge" id="kv-badge" style="display:none;">
+              🔑 <span id="kv-name">Key Vault</span>
+            </div>
           </div>
         </div>
-        <div class="topo-box topo-nsg">NSG<br><span style="font-size:7px;color:var(--muted)">DenyAll</span></div>
-        <div class="topo-box topo-aci" id="topo-aci" style="display:none;">ACI sandbox</div>
       </div>
     </div>
 
@@ -747,6 +834,14 @@ function processEvent(ev, live) {
         setStage(STAGE_MAP[stage], d.status);
       }
       setDetail(d);
+
+      // Feed network bootstrap info into the resource map
+      if (stage === 'network' && d.status === 'complete') {
+        mapBootstrap(d.vnet, d.nsg);
+      }
+      if (stage === 'network' && d.status === 'running') {
+        mapSetStatus('provisioning…');
+      }
       if (stage === 'iac' && d.status === 'complete') {
         iacContents = {
           terraform: d.terraform_contents || {},
@@ -774,14 +869,17 @@ function processEvent(ev, live) {
 
     case 'vm_created':
       vms[d.vm_id] = {...d, status:'running', created_at: ev.timestamp || Date.now()/1000};
+      mapAddNode(d.vm_id, d.role, d.azure_name, d.private_ip);
       break;
     case 'vm_terminated':
       if (vms[d.vm_id]) vms[d.vm_id].status = 'terminated';
+      mapTerminateNode(d.vm_id, d.reason);
       break;
 
     case 'environment_teardown':
       Object.values(vms).forEach(v => v.status = 'terminated');
-      setDetail({message:'🧹 Ephemeral environment destroyed — audit log preserved.', stage:'teardown', status:'complete'});
+      mapTeardown();
+      setDetail({message:'🧹 Ephemeral environment destroyed — audit log preserved.'});
       break;
 
     case 'task_complete':
@@ -818,8 +916,19 @@ function resetPipeline() {
   document.getElementById('iac-preview').style.display = 'none';
   document.getElementById('iac-files').innerHTML = '';
   document.getElementById('stage-detail').textContent = 'Starting analysis...';
-  document.getElementById('topo-aci').style.display = 'none';
-  document.getElementById('topo-agents').innerHTML = '';
+  const map = document.getElementById('res-map');
+  if (map) map.classList.remove('destroyed');
+  const nodes = document.getElementById('res-nodes');
+  if (nodes) nodes.innerHTML = '<div data-placeholder style="color:var(--muted);font-size:9px;padding:4px;">Waiting for containers...</div>';
+  const vnetName = document.getElementById('vnet-name');
+  if (vnetName) vnetName.textContent = '—';
+  const rgName = document.getElementById('rg-name');
+  if (rgName) rgName.textContent = '—';
+  const nsgBadge = document.getElementById('nsg-badge');
+  if (nsgBadge) nsgBadge.className = 'nsg-badge inactive';
+  const kvBadge = document.getElementById('kv-badge');
+  if (kvBadge) kvBadge.style.display = 'none';
+  mapSetStatus('idle');
 }
 
 function setStage(pipId, status) {
@@ -884,7 +993,6 @@ function showIaC(d) {
     filesDiv.appendChild(div);
   });
 
-  document.getElementById('topo-aci').style.display = 'block';
 }
 
 function downloadFile(taskId, path, filename) {
@@ -957,13 +1065,12 @@ async function resolveHitl(reqId, decision) {
 /* ── VM grid ── */
 function renderVMs() {
   const grid = document.getElementById('vm-grid');
-  const agents = document.getElementById('topo-agents');
   const active = Object.values(vms);
   const running = active.filter(v => v.status === 'running');
   document.getElementById('vm-count').textContent = running.length;
   if (!active.length) {
     grid.innerHTML = '<div class="empty" style="grid-column:span 2;">No VMs</div>';
-    agents.innerHTML = ''; return;
+    return;
   }
   grid.innerHTML = active.map(v => {
     const col = ROLE_COLORS[v.role] || '#6c7086';
@@ -974,10 +1081,6 @@ function renderVMs() {
       <div class="vm-ip">${v.private_ip||''}</div>
       <div style="font-size:9px;color:var(--muted)">${age}s</div>
     </div>`;
-  }).join('');
-  agents.innerHTML = running.map(v => {
-    const col = ROLE_COLORS[v.role] || '#89b4fa';
-    return `<div style="background:rgba(137,180,250,.06);border:1px solid ${col};border-radius:3px;padding:2px 5px;font-size:8px;color:${col};">${(v.role||'').slice(0,10)}</div>`;
   }).join('');
 }
 
@@ -1040,6 +1143,110 @@ function renderLog() {
 function renderAll() {
   renderStats(); renderTasks(); renderVMs(); renderLog(); renderHitl();
 }
+
+
+
+/* ── Resource Map ── */
+const ROLE_ICONS = {
+  secure_fetcher:  '🌐', ast_parser:     '🌳', ir_builder:    '⚙️',
+  ml_analyzer:     '🤖', policy_engine:  '⚖️', strategy_agent:'🗺️',
+  iac_generator:   '📄', deployment_agent:'🚀', feasibility_validator:'🔍',
+};
+
+function mapSetStatus(txt) {
+  const el = document.getElementById('res-map-status');
+  if (el) el.textContent = txt;
+}
+
+function mapBootstrap(vnetName, nsgName) {
+  const map = document.getElementById('res-map');
+  if (map) map.classList.remove('destroyed');
+  const banner = document.querySelector('.res-map-destroyed-banner');
+  if (banner) banner.style.display = 'none';
+
+  const vn = document.getElementById('vnet-name');
+  if (vn) vn.textContent = vnetName || '—';
+
+  const rn = document.getElementById('rg-name');
+  if (rn) rn.textContent = 'rg-secure-analysis';
+
+  const nsgBadge = document.getElementById('nsg-badge');
+  const nsgName2 = document.getElementById('nsg-name');
+  if (nsgBadge) nsgBadge.className = 'nsg-badge active';
+  if (nsgName2) nsgName2.textContent = nsgName || 'NSG';
+
+  // Show KV badge if vault name known
+  const vault = 'kv-secanalysis';
+  const kvBadge = document.getElementById('kv-badge');
+  const kvName  = document.getElementById('kv-name');
+  if (kvBadge) kvBadge.style.display = 'flex';
+  if (kvName)  kvName.textContent = vault;
+
+  // Clear placeholder
+  const nodes = document.getElementById('res-nodes');
+  if (nodes) nodes.innerHTML = '';
+
+  mapSetStatus('🟢 active');
+}
+
+function mapAddNode(vmId, role, azureName, ip) {
+  const nodes = document.getElementById('res-nodes');
+  if (!nodes) return;
+
+  // Remove placeholder if present
+  const placeholder = nodes.querySelector('[data-placeholder]');
+  if (placeholder) placeholder.remove();
+
+  const col = ROLE_COLORS[role] || '#89b4fa';
+  const icon = ROLE_ICONS[role] || '📦';
+  const label = (role || '').replace(/_/g, '-');
+  const shortName = (azureName || vmId || '').slice(0, 18);
+  const tip = `${role} · ${ip || ''} · ${shortName}`;
+
+  const el = document.createElement('div');
+  el.className = 'res-node spawning running';
+  el.id = `resnode-${vmId}`;
+  el.dataset.tip = tip;
+  el.style.borderColor = col;
+  el.style.color = col;
+  el.style.background = `${col}0d`;
+  el.innerHTML = `
+    <div class="res-dot" style="background:${col}"></div>
+    <span>${icon}</span>
+    <span class="res-name">${label}</span>
+  `;
+  nodes.appendChild(el);
+}
+
+function mapTerminateNode(vmId, reason) {
+  const el = document.getElementById(`resnode-${vmId}`);
+  if (!el) return;
+  el.classList.remove('running', 'spawning');
+  el.classList.add('terminated');
+  const dot = el.querySelector('.res-dot');
+  if (dot) dot.style.background = 'var(--muted)';
+  // Update tooltip
+  el.dataset.tip = (el.dataset.tip || '') + ` · ${reason || 'terminated'}`;
+  // Fade out after 4 seconds
+  setTimeout(() => {
+    el.style.transition = 'opacity 1.2s ease';
+    el.style.opacity = '0';
+    setTimeout(() => el.remove(), 1300);
+  }, 4000);
+}
+
+function mapTeardown() {
+  const map = document.getElementById('res-map');
+  if (map) map.classList.add('destroyed');
+  mapSetStatus('🔴 destroyed');
+  // Terminate all remaining nodes
+  document.querySelectorAll('.res-node.running').forEach(el => {
+    el.classList.remove('running');
+    el.classList.add('terminated');
+  });
+}
+
+
 
 /* ── Analyze trigger ── */
 async function analyze() {

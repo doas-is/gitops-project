@@ -43,6 +43,7 @@ from src.agents.policy_engine import PolicyEngine
 from src.agents.deployment_strategy import DeploymentStrategyAgent
 from src.agents.iac_generator import IaCGeneratorAgent
 from src.agents.deployment_agent import DeploymentAgent
+from src.agents.feasibility_validator import FeasibilityValidatorAgent, ErrorCategory
 from src.azure_setup import MicroVMOrchestrator, MicroVMRecord
 from src.key_management import FileEncryptor, build_kms, EncryptedPayload
 from src.parser import parse_source_bytes
@@ -244,6 +245,7 @@ class SecureAnalysisPipeline:
         self.strategy_agent  = DeploymentStrategyAgent()
         self.iac_agent       = IaCGeneratorAgent()
         self.deploy_agent    = DeploymentAgent()
+        self.feasibility_agent = FeasibilityValidatorAgent()
         self._audit          = get_audit()
         self._orchestrator   = MicroVMOrchestrator()
         self._pipeline_runs  = 0
@@ -683,7 +685,10 @@ class SecureAnalysisPipeline:
             try:
                 ir_payloads.append(build_ir_from_ast(ast_p))
             except Exception as e:
-                logger.warning("IR error file %d: %s", ast_p.file_index, e)
+                logger.error("IR error file %d: %s", ast_p.file_index, e, exc_info=True)
+
+        if not ir_payloads:
+            return await self._abort(task_id, "IR build failed for all files — check logs for schema errors", start)
 
         await self._spin_down(vm_ir, "stage_complete")
         total_ir_nodes = sum(ir.total_nodes for ir in ir_payloads)
@@ -841,46 +846,285 @@ class SecureAnalysisPipeline:
             ),
         })
 
-        # ── Stage 7: IaC GENERATE ─────────────────────────────────
-        vm_iac = await self._spin_up("iac_generator", task_id)
-        _emit("stage_update", {
-            "task_id": task_id, "stage": "iac",
-            "status": "running",
-            "message": (
-                "Generating Terraform + Ansible from: "
-                "security flags, policy constraints, infra metadata, "
-                "dependency graph, control-flow analysis..."
-            ),
-        })
+        # ── Retry config ──────────────────────────────────────────
+        # MAX_IaC_RETRIES controls the overall budget for Stage 7+7.5.
+        # STRATEGY_RESTART_BUDGET controls how many of those retries are
+        # allowed to restart from Stage 6 (Strategy) rather than Stage 7.
+        MAX_IaC_RETRIES        = int(os.getenv("MAX_IAC_RETRIES", "3"))
+        STRATEGY_RESTART_BUDGET = int(os.getenv("STRATEGY_RESTART_BUDGET", "1"))
 
-        iac_bundle = self.iac_agent.generate(policy_decision, strategy)
+        iac_bundle    = None
+        deploy_result = None
+        feasibility_result = None
+        last_error_feedback: str = ""      # fed back into generate() on retry
+        strategy_restarts   = 0
+        iac_attempt         = 0
 
-        await self._spin_down(vm_iac, "stage_complete")
-        self._audit.iac_generated(
-            task_id,
-            list(iac_bundle.terraform_files.keys()),
-            list(iac_bundle.ansible_files.keys()),
-        )
-        _emit("stage_update", {
-            "task_id":           task_id, "stage": "iac", "status": "complete",
-            "terraform_files":   list(iac_bundle.terraform_files.keys()),
-            "ansible_files":     list(iac_bundle.ansible_files.keys()),
-            "terraform_contents": iac_bundle.terraform_files,
-            "ansible_contents":  iac_bundle.ansible_files,
-            "method":            iac_bundle.method,
-            "message": (
-                f"IaC generated: {len(iac_bundle.terraform_files)} Terraform + "
-                f"{len(iac_bundle.ansible_files)} Ansible files "
-                f"(method={iac_bundle.method})"
-            ),
-        })
+        for iac_attempt in range(1, MAX_IaC_RETRIES + 1):
+
+            # ── Stage 6 (conditional re-run): STRATEGY ────────────
+            # On the first pass, or when the validator says the strategy
+            # itself is wrong (RESOURCE_MISMATCH / HINT_MISMATCH), we
+            # re-run the strategy agent — up to STRATEGY_RESTART_BUDGET times.
+            run_strategy = (
+                iac_attempt == 1
+                or (
+                    feasibility_result is not None
+                    and feasibility_result.restart_from_strategy
+                    and strategy_restarts < STRATEGY_RESTART_BUDGET
+                )
+            )
+
+            if run_strategy:
+                if iac_attempt > 1:
+                    strategy_restarts += 1
+                    _emit("stage_update", {
+                        "task_id": task_id, "stage": "strategy",
+                        "status": "running",
+                        "attempt": iac_attempt,
+                        "message": (
+                            f"⟳ Re-running Strategy Agent "
+                            f"(attempt {iac_attempt}/{MAX_IaC_RETRIES} — "
+                            f"feasibility error: {feasibility_result.error_category})"
+                        ),
+                    }, severity="warning")
+                    self._audit.log(
+                        "STRATEGY_RETRY", "warning", task_id=task_id,
+                        stage="strategy",
+                        message=(
+                            f"Strategy re-run (attempt {iac_attempt}): "
+                            f"{feasibility_result.error_summary}"
+                        ),
+                        data={
+                            "attempt":        iac_attempt,
+                            "error_category": str(feasibility_result.error_category),
+                            "retry_hint":     feasibility_result.retry_hint,
+                        },
+                    )
+
+                vm_strat = await self._spin_up("strategy_agent", task_id)
+                if iac_attempt == 1:
+                    _emit("stage_update", {
+                        "task_id": task_id, "stage": "strategy",
+                        "status": "running",
+                        "message": "Deciding deployment strategy from IR metrics + policy...",
+                    })
+
+                ir_metrics = {
+                    "total_ir_nodes":          risk_assessment.total_ir_nodes,
+                    "privileged_api_count":    risk_assessment.privileged_api_count,
+                    "high_risk_file_count":    risk_assessment.high_risk_file_count,
+                    "anomalous_pattern_count": risk_assessment.anomalous_pattern_count,
+                    "aggregate_risk":          risk_assessment.aggregate_risk,
+                }
+                strategy = self.strategy_agent.decide(policy_decision, ir_metrics, task_id)
+
+                await self._spin_down(vm_strat, "stage_complete")
+                self._audit.deployment_strategy(
+                    task_id, strategy.method, "; ".join(strategy.reasoning)
+                )
+                _emit("stage_update", {
+                    "task_id":      task_id, "stage": "strategy", "status": "complete",
+                    "method":       strategy.method,
+                    "primary_tool": strategy.primary_tool,
+                    "reasoning":    strategy.reasoning[:3],
+                    "attempt":      iac_attempt,
+                    "message": (
+                        f"Strategy: {strategy.method.upper()} — "
+                        f"{strategy.primary_tool}"
+                        + (f" + {strategy.secondary_tool}" if strategy.secondary_tool else "")
+                    ),
+                })
+
+            # ── Stage 7: IaC GENERATE ─────────────────────────────
+            if iac_attempt > 1:
+                _emit("stage_update", {
+                    "task_id": task_id, "stage": "iac",
+                    "status": "running",
+                    "attempt": iac_attempt,
+                    "message": (
+                        f"⟳ Re-generating IaC "
+                        f"(attempt {iac_attempt}/{MAX_IaC_RETRIES}) — "
+                        f"previous error: {last_error_feedback[:120]}"
+                    ),
+                }, severity="warning")
+                self._audit.log(
+                    "IAC_RETRY", "warning", task_id=task_id,
+                    stage="iac",
+                    message=f"IaC re-generation attempt {iac_attempt}",
+                    data={
+                        "attempt":      iac_attempt,
+                        "error_feedback": last_error_feedback[:500],
+                    },
+                )
+
+            vm_iac = await self._spin_up("iac_generator", task_id)
+            if iac_attempt == 1:
+                _emit("stage_update", {
+                    "task_id": task_id, "stage": "iac",
+                    "status": "running",
+                    "message": (
+                        "Generating Terraform + Ansible from: "
+                        "security flags, policy constraints, infra metadata, "
+                        "dependency graph, control-flow analysis..."
+                    ),
+                })
+
+            # Pass error feedback on retries so the generator can self-correct.
+            # NOTE: IaCGeneratorAgent.generate() currently ignores error_feedback
+            #       (it is template-based). When the LLM backend is wired in,
+            #       add `error_feedback: str = ""` as a parameter and inject it
+            #       into the LLM prompt so the model knows what to fix.
+            iac_bundle = self.iac_agent.generate(
+                policy_decision,
+                strategy,
+                # error_feedback=last_error_feedback,  # ← uncomment with LLM backend
+            )
+
+            await self._spin_down(vm_iac, "stage_complete")
+            self._audit.iac_generated(
+                task_id,
+                list(iac_bundle.terraform_files.keys()),
+                list(iac_bundle.ansible_files.keys()),
+            )
+            _emit("stage_update", {
+                "task_id":            task_id, "stage": "iac", "status": "complete",
+                "terraform_files":    list(iac_bundle.terraform_files.keys()),
+                "ansible_files":      list(iac_bundle.ansible_files.keys()),
+                "terraform_contents": iac_bundle.terraform_files,
+                "ansible_contents":   iac_bundle.ansible_files,
+                "method":             iac_bundle.method,
+                "attempt":            iac_attempt,
+                "message": (
+                    f"IaC generated: {len(iac_bundle.terraform_files)} Terraform + "
+                    f"{len(iac_bundle.ansible_files)} Ansible files "
+                    f"(method={iac_bundle.method}, attempt={iac_attempt})"
+                ),
+            })
+
+            # ── Stage 7.5: FEASIBILITY VALIDATION ─────────────────
+            vm_val = await self._spin_up("feasibility_validator", task_id)
+            _emit("stage_update", {
+                "task_id": task_id, "stage": "feasibility",
+                "status": "running",
+                "attempt": iac_attempt,
+                "message": (
+                    f"Validating IaC feasibility "
+                    f"(attempt {iac_attempt}/{MAX_IaC_RETRIES}): "
+                    "terraform validate → ansible-lint → terraform plan → "
+                    "resource cross-check → infra-hint coverage..."
+                ),
+            })
+
+            feasibility_result = await self.feasibility_agent.validate(
+                iac_bundle,
+                intel,
+                attempt=iac_attempt,
+            )
+
+            await self._spin_down(vm_val, "stage_complete" if feasibility_result.passed else "feasibility_failed")
+
+            if feasibility_result.passed:
+                # ✅ Validation passed — log and break out of retry loop
+                _emit("stage_update", {
+                    "task_id":            task_id, "stage": "feasibility",
+                    "status":             "complete",
+                    "attempt":            iac_attempt,
+                    "planned_resources":  feasibility_result.planned_resources,
+                    "checks_passed":      len(feasibility_result.checks),
+                    "duration":           feasibility_result.duration_seconds,
+                    "message": (
+                        f"✅ Feasibility passed in {feasibility_result.duration_seconds:.1f}s "
+                        f"({len(feasibility_result.checks)} checks, "
+                        f"{len(feasibility_result.planned_resources)} resources planned)"
+                    ),
+                })
+                self._audit.log(
+                    "FEASIBILITY_PASSED", "info", task_id=task_id,
+                    stage="feasibility",
+                    message=f"IaC validated on attempt {iac_attempt}",
+                    data={"attempt": iac_attempt, "checks": len(feasibility_result.checks)},
+                )
+                break  # ← exit retry loop, proceed to real deployment
+
+            else:
+                # ❌ Validation failed — decide whether to retry or abort
+                last_error_feedback = feasibility_result.retry_hint
+                remaining = MAX_IaC_RETRIES - iac_attempt
+
+                self._audit.log(
+                    "FEASIBILITY_FAILED", "warning", task_id=task_id,
+                    stage="feasibility",
+                    message=(
+                        f"IaC validation failed (attempt {iac_attempt}): "
+                        f"{feasibility_result.error_summary}"
+                    ),
+                    data={
+                        "attempt":        iac_attempt,
+                        "error_category": str(feasibility_result.error_category),
+                        "error_summary":  feasibility_result.error_summary,
+                        "remaining":      remaining,
+                        "restart_from_strategy": feasibility_result.restart_from_strategy,
+                    },
+                )
+
+                if remaining == 0:
+                    # Budget exhausted — hard abort
+                    _emit("stage_update", {
+                        "task_id": task_id, "stage": "feasibility",
+                        "status": "error",
+                        "attempt": iac_attempt,
+                        "message": (
+                            f"❌ Feasibility failed after {iac_attempt} attempt(s). "
+                            f"Last error: {feasibility_result.error_summary}"
+                        ),
+                    }, severity="error")
+                    return await self._abort(
+                        task_id,
+                        f"IaC feasibility failed after {iac_attempt} attempt(s): "
+                        f"{feasibility_result.error_summary}",
+                        start,
+                    )
+
+                # Still have retries — emit warning and loop
+                restart_info = (
+                    "Restarting from Strategy Agent"
+                    if feasibility_result.restart_from_strategy
+                    else "Restarting IaC generation"
+                )
+                _emit("stage_update", {
+                    "task_id":      task_id, "stage": "feasibility",
+                    "status":       "error",
+                    "attempt":      iac_attempt,
+                    "error":        feasibility_result.error_summary,
+                    "error_category": str(feasibility_result.error_category),
+                    "retry_hint":   feasibility_result.retry_hint[:300],
+                    "remaining":    remaining,
+                    "message": (
+                        f"⚠️ Feasibility check failed "
+                        f"[{feasibility_result.error_category}] — "
+                        f"{restart_info} "
+                        f"({remaining} attempt(s) remaining)"
+                    ),
+                }, severity="warning")
+
+        # ── Guard: should never reach here without a result, but be safe ──
+        if iac_bundle is None or feasibility_result is None or not feasibility_result.passed:
+            return await self._abort(
+                task_id,
+                "IaC generation loop exited without a valid feasibility result",
+                start,
+            )
 
         # ── Stage 8: DEPLOY ───────────────────────────────────────
         vm_deploy = await self._spin_up("deployment_agent", task_id)
         _emit("stage_update", {
             "task_id": task_id, "stage": "deploy",
             "status": "running",
-            "message": "Applying IaC to Azure...",
+            "message": (
+                f"Applying validated IaC to Azure "
+                f"(validated in {iac_attempt} attempt(s))..."
+            ),
         })
 
         deploy_result = await self.deploy_agent.deploy(iac_bundle)
@@ -888,16 +1132,16 @@ class SecureAnalysisPipeline:
         await self._spin_down(vm_deploy, "task_complete")
 
         # ── Stage 9: TEARDOWN ─────────────────────────────────────
-        remaining = await self._orchestrator.terminate_task_vms(
+        remaining_vms = await self._orchestrator.terminate_task_vms(
             task_id, "task_complete"
         )
         await self._orchestrator.teardown_task_network(task_id)
-        self._audit.environment_teardown(task_id, remaining)
+        self._audit.environment_teardown(task_id, remaining_vms)
         _emit("environment_teardown", {
-            "task_id":      task_id, "stage": "teardown",
-            "vms_destroyed": remaining,
+            "task_id":       task_id, "stage": "teardown",
+            "vms_destroyed": remaining_vms,
             "message": (
-                f"Teardown complete — {remaining} ACIs deleted, "
+                f"Teardown complete — {remaining_vms} ACIs deleted, "
                 "VNet + NSG removed. Audit log preserved."
             ),
         }, severity="warning")

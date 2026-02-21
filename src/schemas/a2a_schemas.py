@@ -205,6 +205,28 @@ class IRPayload(BaseModel):
     dynamic_eval_count: int
     embedding_vector: Optional[List[float]] = None
 
+    # Rich fields produced by ir_builder.py
+    high_risk_node_count: int = 0
+    pattern_extra_risk: int = 0
+    cross_patterns: List[CrossPatternHit] = Field(default_factory=list)
+    token_sequence: List[str] = Field(default_factory=list)
+    feature_vector: Dict[str, float] = Field(default_factory=dict)
+    type_frequency: Dict[str, int] = Field(default_factory=dict)
+    category_risk_sums: Dict[str, float] = Field(default_factory=dict)
+
+    # Computed convenience properties for ml_analyzer
+    @property
+    def loop_count(self) -> int:
+        return self.type_frequency.get("LOOP", 0)
+
+    @property
+    def branch_count(self) -> int:
+        return self.type_frequency.get("BRANCH", 0)
+
+    @property
+    def call_count(self) -> int:
+        return self.type_frequency.get("CALL", 0)
+
     class Config:
         frozen = True
 

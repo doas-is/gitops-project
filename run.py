@@ -14,6 +14,31 @@ import sys
 # Ensure src is importable
 sys.path.insert(0, os.path.dirname(__file__))
 
+# Load .env before anything else
+from dotenv import load_dotenv
+load_dotenv(override=False)  # override=False: real env vars take precedence
+def _check_env() -> None:
+    dry_run = os.getenv("AZURE_DEPLOY_DRY_RUN", "true").lower() == "true"
+    kms_local = os.getenv("KMS_LOCAL", "true").lower() == "true"
+    if not dry_run or not kms_local:
+        required = [
+            "AZURE_SUBSCRIPTION_ID", "AZURE_TENANT_ID",
+            "AZURE_CLIENT_ID", "AZURE_CLIENT_SECRET",
+            "GITHUB_TOKEN",
+        ]
+        missing = [k for k in required if not os.getenv(k)]
+        if missing:
+            print(f"❌ Missing required env vars: {', '.join(missing)}")
+            print("   Check your .env file.")
+            sys.exit(1)
+    acr = os.getenv("ACR_NAME")
+    agent_image = os.getenv("AGENT_IMAGE", "")
+    if acr and "azurecr.io" in agent_image:
+        if not os.getenv("ACR_USERNAME") or not os.getenv("ACR_PASSWORD"):
+            print("❌ ACR_NAME is set but ACR_USERNAME / ACR_PASSWORD are missing.")
+            sys.exit(1)
+
+_check_env()
 os.environ.setdefault("KMS_LOCAL", "false")
 
 

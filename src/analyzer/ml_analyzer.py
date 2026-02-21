@@ -682,6 +682,11 @@ class MLSecurityAnalyzer:
         """Heuristic scoring for a single IRPayload."""
         flagged: list = []
 
+        # Use type_frequency for loop/branch counts if direct attr missing
+        loop_count   = ir.type_frequency.get("LOOP", 0)   if ir.type_frequency else 0
+        branch_count = ir.type_frequency.get("BRANCH", 0) if ir.type_frequency else 0
+        call_count   = ir.type_frequency.get("CALL", 0)   if ir.type_frequency else 0
+
         # Structural anomaly
         structural = min(ir.total_nodes / 500.0, 1.0) * 0.3
 

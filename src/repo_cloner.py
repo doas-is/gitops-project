@@ -66,8 +66,8 @@ class SecureFetcherAgent:
 
     def __init__(
         self,
-        mtls_config: MTLSConfig,
-        parser_host: str,
+        mtls_config: Optional[MTLSConfig] = None,
+        parser_host: Optional[str] = None,
         parser_port: int = 8443,
         use_local_kms: bool = False,
     ) -> None:
@@ -76,7 +76,8 @@ class SecureFetcherAgent:
         self.parser_port = parser_port
         self.kms = build_kms(use_local=use_local_kms)
         self.encryptor = FileEncryptor(self.kms)
-        self.client = MTLSClient(mtls_config)
+        # Only build mTLS client if config provided (orchestrator mode skips this)
+        self.client = MTLSClient(mtls_config) if mtls_config else None
         self._github_token = os.getenv("GITHUB_TOKEN")
         self._stats = {
             "files_fetched": 0,

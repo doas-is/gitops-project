@@ -171,22 +171,17 @@ class DeploymentStrategyAgent:
         )
 
     def _estimate_resources(self, constraints: List[str], ir_metrics: Dict) -> List[str]:
-        """Estimate Azure resources needed based on constraints and metrics."""
         resources = [
             "azurerm_resource_group",
             "azurerm_virtual_network",
             "azurerm_subnet",
             "azurerm_network_security_group",
-            "azurerm_container_group",
+            "azurerm_container_group",   # always generated
         ]
         if "network_isolation" in constraints:
             resources.append("azurerm_private_endpoint")
             resources.append("azurerm_private_dns_zone")
-        if "sandboxed_execution" in constraints:
-            resources.append("azurerm_container_registry")
         if "monitoring_required" in constraints:
             resources.append("azurerm_log_analytics_workspace")
             resources.append("azurerm_monitor_activity_log_alert")
-        if ir_metrics.get("network_call_count", 0) > 0:
-            resources.append("azurerm_application_gateway")
         return resources

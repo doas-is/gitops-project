@@ -898,7 +898,7 @@ def _build_token_sequence(flat_nodes: List[IRNode], max_tokens: int = 512) -> st
 
     seq = tokens[:body_budget]
     seq.extend(amplified[:tail_budget])
-    return " ".join(seq)
+    return seq  # return the list directly, not a joined string
 
 
 # ── Feature vector builder ─────────────────────────────────────────────────
